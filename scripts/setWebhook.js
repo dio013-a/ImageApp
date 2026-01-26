@@ -6,7 +6,7 @@ async function setWebhook() {
   const config = getConfig();
 
   const TG_TOKEN = config.TG_TOKEN;
-  const webhookUrl = `${config.BASE_URL}/api/telegram/webhook`;
+  const webhookUrl = `${config.BASE_URL}/api/telegram`;
   const secretToken = process.env.TG_WEBHOOK_SECRET;
 
   console.log(`Setting webhook to: ${webhookUrl}`);
