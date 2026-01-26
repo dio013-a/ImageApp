@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-worker",
+    "module": "commonjs",
+    "target": "ES2022",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": false
+  },
+  "include": ["worker/**/*.ts", "lib/**/*.ts"],
+  "exclude": ["node_modules", "dist-worker", ".next"]
+}
