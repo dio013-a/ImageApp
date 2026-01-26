@@ -33,22 +33,14 @@ export default async function handler(
     const secretToken = process.env.TG_WEBHOOK_SECRET;
     const config = getConfig();
 
-    // TEMPORARY: disable webhook secret validation for quick testing.
-    // Set this to `false` or remove before deploying to production.
-    const TEMP_DISABLE_TG_WEBHOOK_SECRET = true;
-
-    if (TEMP_DISABLE_TG_WEBHOOK_SECRET) {
-      console.warn('[webhook] TEMP: Skipping TG_WEBHOOK_SECRET validation (for testing)');
-    } else {
-      if (config.NODE_ENV === 'production' && !secretToken) {
-        console.error('[webhook] FATAL: TG_WEBHOOK_SECRET not configured in production');
-        return res.status(500).json({ error: 'Server misconfigured' });
-      }
-
-      if (secretToken && telegramSignature !== secretToken) {
-        console.error('[webhook] REJECTED: Invalid Telegram signature');
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
+    if (config.NODE_ENV === 'production' && !secretToken) {
+      console.error('[webhook] FATAL: TG_WEBHOOK_SECRET not configured in production');
+      return res.status(500).json({ error: 'Server misconfigured' });
+    }
+    
+    if (secretToken && telegramSignature !== secretToken) {
+      console.error('[webhook] REJECTED: Invalid Telegram signature');
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const update = req.body;
