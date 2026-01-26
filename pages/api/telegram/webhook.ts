@@ -71,7 +71,7 @@ export default async function handler(
     const update = req.body;
 
     // Handle callback queries (button presses)
-    if (update.callback_query) {
+    if (update.callback_query && update.callback_query.id) {
       return handleCallbackQuery(req, res, update.callback_query);
     }
 
@@ -387,10 +387,15 @@ async function handleCallbackQuery(
     }
   } catch (error) {
     safeError('[webhook] Callback query error', error);
-    await answerCallbackQuery(callbackId, {
-      text: 'Something went wrong. Please try again.',
-      show_alert: true,
-    });
+    try {
+      await answerCallbackQuery(callbackId, {
+        text: 'Something went wrong. Please try again.',
+        show_alert: true,
+      });
+    } catch (answerError) {
+      // Ignore if answerCallbackQuery fails (e.g., already answered or expired)
+      safeError('[webhook] Failed to answer callback query', answerError);
+    }
   }
 
   return res.status(200).json({ ok: true });
@@ -405,10 +410,14 @@ async function handleSessionDone(
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
-    await answerCallbackQuery(callbackId, {
-      text: 'No active session. Send /start to begin.',
-      show_alert: true,
-    });
+    try {
+      await answerCallbackQuery(callbackId, {
+        text: 'No active session. Send /start to begin.',
+        show_alert: true,
+      });
+    } catch (err) {
+      safeError('[webhook] Failed to answer callback query', err);
+    }
     return;
   }
 
@@ -416,10 +425,14 @@ async function handleSessionDone(
 
   // Validate image count
   if (imageCount === 0) {
-    await answerCallbackQuery(callbackId, {
-      text: 'Please send at least one photo first.',
-      show_alert: true,
-    });
+    try {
+      await answerCallbackQuery(callbackId, {
+        text: 'Please send at least one photo first.',
+        show_alert: true,
+      });
+    } catch (err) {
+      safeError('[webhook] Failed to answer callback query', err);
+    }
     return;
   }
 
@@ -435,9 +448,13 @@ async function handleSessionDone(
     }
   }
 
-  await answerCallbackQuery(callbackId, {
-    text: `Processing ${imageCount} image${imageCount > 1 ? 's' : ''}...`,
-  });
+  try {
+    await answerCallbackQuery(callbackId, {
+      text: `Processing ${imageCount} image${imageCount > 1 ? 's' : ''}...`,
+    });
+  } catch (err) {
+    safeError('[webhook] Failed to answer callback query', err);
+  }
 
   await sendMessage(
     chatId,
@@ -470,9 +487,13 @@ async function handleSessionCancel(
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
-    await answerCallbackQuery(callbackId, {
-      text: 'No active session to cancel.',
-    });
+    try {
+      await answerCallbackQuery(callbackId, {
+        text: 'No active session to cancel.',
+      });
+    } catch (err) {
+      safeError('[webhook] Failed to answer callback query', err);
+    }
     return;
   }
 
@@ -487,9 +508,13 @@ async function handleSessionCancel(
     }
   }
 
-  await answerCallbackQuery(callbackId, {
-    text: 'Session cancelled.',
-  });
+  try {
+    await answerCallbackQuery(callbackId, {
+      text: 'Session cancelled.',
+    });
+  } catch (err) {
+    safeError('[webhook] Failed to answer callback query', err);
+  }
 
   await sendMessage(chatId, 'Session cancelled. Send /start to begin a new one.');
 }
@@ -505,7 +530,11 @@ async function handleSessionTips(chatId: number, callbackId: string) {
 
 Press ✅ Done when ready!`;
 
-  await answerCallbackQuery(callbackId);
+  try {
+    await answerCallbackQuery(callbackId);
+  } catch (err) {
+    safeError('[webhook] Failed to answer callback query', err);
+  }
   await sendMessage(chatId, tipsText, { parse_mode: 'Markdown' });
 }
 
@@ -518,6 +547,12 @@ async function startSessionGeneration(
   
   if (!session || session.id !== sessionId) {
     throw new Error('Session not found or changed');
+  }
+
+  // Idempotency: check if job already created for this session
+  if (session.job_id) {
+    console.log(`[webhook] Session ${sessionId} already has job ${session.job_id}, skipping duplicate creation`);
+    return;
   }
 
   // Build prompt

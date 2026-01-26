@@ -21,7 +21,7 @@ let cachedConfig: AppConfig | null = null;
 export function getConfig(): AppConfig {
   if (cachedConfig) return cachedConfig;
 
-  const NODE_ENV = process.env.NODE_ENV || 'development';
+  const NODE_ENV = process.env.NODE_ENV || 'production';
   const STORAGE_BUCKET = (process.env.STORAGE_BUCKET || 'uploads').trim();
 
   const RETENTION_DAYS = Number.parseInt(process.env.RETENTION_DAYS || '30', 10);
