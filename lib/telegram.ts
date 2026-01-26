@@ -142,6 +142,31 @@ export function buildFileUrl(filePath: string): string {
   return `${getTgFileBase()}/${filePath}`;
 }
 
+export async function answerCallbackQuery(
+  callbackQueryId: string,
+  options?: {
+    text?: string;
+    show_alert?: boolean;
+  },
+): Promise<any> {
+  return tgPost('answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    ...options,
+  });
+}
+
+export async function editMessageReplyMarkup(
+  chatId: string | number,
+  messageId: number,
+  replyMarkup?: any,
+): Promise<any> {
+  return tgPost('editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: replyMarkup,
+  });
+}
+
 export default {
   sendMessage,
   sendPhoto,
@@ -150,4 +175,6 @@ export default {
   downloadFileByPath,
   downloadFile,
   buildFileUrl,
+  answerCallbackQuery,
+  editMessageReplyMarkup,
 };

@@ -7,7 +7,8 @@ export type ProviderName = 'replicate' | 'banana';
 export interface StartJobParams {
   jobId: string;
   provider?: ProviderName;
-  inputImage: { bucket?: string; path: string };
+  inputImage?: { bucket?: string; path: string }; // Legacy single image
+  inputImages?: Array<{ bucket?: string; path: string }>; // Multi-image support
   prompt?: string;
   settings?: Record<string, any>;
   modelVersion?: string;
@@ -29,12 +30,31 @@ async function startReplicateJob(params: StartJobParams): Promise<StartJobResult
   // Build callback URL
   const callbackUrl = `${config.BASE_URL}/api/provider/callback?job_id=${params.jobId}`;
 
-  // Create signed URL for input image (15 minutes)
-  const signedUrl = await createSignedUrl({
-    bucket: params.inputImage.bucket,
-    path: params.inputImage.path,
-    expiresIn: 900,
-  });
+  // Handle multiple images or single image
+  let imageInputData: string | string[];
+  
+  if (params.inputImages && params.inputImages.length > 0) {
+    // Multi-image: create signed URLs for all images
+    const signedUrls = await Promise.all(
+      params.inputImages.map((img) =>
+        createSignedUrl({
+          bucket: img.bucket,
+          path: img.path,
+          expiresIn: 900,
+        })
+      )
+    );
+    imageInputData = signedUrls;
+  } else if (params.inputImage) {
+    // Single image (legacy)
+    imageInputData = await createSignedUrl({
+      bucket: params.inputImage.bucket,
+      path: params.inputImage.path,
+      expiresIn: 900,
+    });
+  } else {
+    throw new Error('[replicate:start] No input image(s) provided');
+  }
 
   // Determine model version
   const modelVersion = params.modelVersion || process.env.REPLICATE_MODEL_VERSION;
@@ -44,7 +64,7 @@ async function startReplicateJob(params: StartJobParams): Promise<StartJobResult
 
   // Build input object
   const input: Record<string, any> = {
-    image: signedUrl,
+    image_input: imageInputData, // Use image_input for multi-image models
     ...(params.settings || {}),
   };
   if (params.prompt) {

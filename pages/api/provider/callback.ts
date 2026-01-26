@@ -9,6 +9,7 @@ import {
 import { sendMessage, sendPhoto, editMessageText } from '../../../lib/telegram';
 import { storeResult } from '../../../lib/storeResult';
 import { safeError } from '../../../lib/logger';
+import { getSessionByJobId, updateSessionStatus } from '../../../lib/sessionHelpers';
 
 function verifyWebhookSignature(
   jobId: string,
@@ -94,9 +95,19 @@ export default async function handler(
       const errorMessage = error || `Provider status: ${status}`;
       await markJobFailed(jobId, errorMessage);
 
+      // Update session status if exists
+      try {
+        const session = await getSessionByJobId(jobId);
+        if (session) {
+          await updateSessionStatus(session.id, 'failed', { errorMessage });
+        }
+      } catch (err) {
+        // Continue anyway
+      }
+
       await sendMessage(
         chatId,
-        'Sorry — processing failed. Please try again.',
+        '❌ Sorry — processing failed. Please try again with /start.',
       );
 
       return res.status(200).json({ ok: true });
@@ -136,6 +147,18 @@ export default async function handler(
       // Mark job success (idempotent - handled in markJobSuccess)
       await markJobSuccess(jobId, signedUrl, payload);
 
+      // Update session status if this job belongs to a session
+      try {
+        const session = await getSessionByJobId(jobId);
+        if (session) {
+          await updateSessionStatus(session.id, 'done');
+          console.log(`[provider/callback] Session ${session.id} completed`);
+        }
+      } catch (sessionError) {
+        console.error('[provider/callback] Session update failed:', sessionError);
+        // Continue anyway
+      }
+
       // Notify Telegram
       const messageId = job.telegram_message_id;
       if (messageId && !isNaN(Number(messageId))) {
@@ -151,7 +174,20 @@ export default async function handler(
         }
       }
 
-      await sendPhoto(chatId, signedUrl, 'Here is your photo.');
+      // Get session to determine message text
+      let caption = 'Here is your photo.';
+      try {
+        const session = await getSessionByJobId(jobId);
+        if (session && session.image_input.length > 1) {
+          caption = `✅ Done. This is your professional studio family portrait from ${session.image_input.length} photos.\n\nWant a different style? Send /start to begin again.`;
+        } else if (session && session.image_input.length === 1) {
+          caption = '✅ Done. This is your professional studio portrait.\n\nWant to try with more photos? Send /start to begin again.';
+        }
+      } catch (err) {
+        // Use default caption
+      }
+
+      await sendPhoto(chatId, signedUrl, caption);
 
       return res.status(200).json({ ok: true });
     }
