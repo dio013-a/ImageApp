@@ -39,7 +39,7 @@ const SESSION_KEYBOARD = {
 
 // Media group tracking (in-memory, simple approach for stateless functions)
 // Key: mediaGroupId, Value: { chatId, count, timer }
-const mediaGroupTracking = new Map<string, { chatId: number; count: number; timer: NodeJS.Timeout }>();
+const mediaGroupTracking = new Map<string, { chatId: number; count: number; timer: ReturnType<typeof setTimeout> }>();
 
 export default async function handler(
   req: NextApiRequest,
