@@ -197,7 +197,6 @@ async function handleCancelCommand(chatId: number) {
   
   return { ok: true };
 }
-  mediaGroupId?: string,
 
 async function handleImageUpload(
   chatId: number,
@@ -205,6 +204,7 @@ async function handleImageUpload(
   messageId: number | undefined,
   fileId: string,
   isDocument: boolean,
+  mediaGroupId?: string,
 ) {
   // Get or create session
   let session = await getActiveSession(chatId.toString());
