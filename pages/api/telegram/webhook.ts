@@ -37,6 +37,10 @@ const SESSION_KEYBOARD = {
   ],
 };
 
+// Media group tracking (in-memory, simple approach for stateless functions)
+// Key: mediaGroupId, Value: { chatId, count, timer }
+const mediaGroupTracking = new Map<string, { chatId: number; count: number; timer: NodeJS.Timeout }>();
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse,
@@ -76,6 +80,7 @@ export default async function handler(
     chatId = message?.chat?.id;
     const userId = message?.from?.id;
     const messageId = message?.message_id;
+    const mediaGroupId = message?.media_group_id; // Photos sent as album
 
     // Ignore non-message updates
     if (!message || !chatId) {
@@ -125,7 +130,14 @@ export default async function handler(
     }
 
     // Handle image collection for session
-    return handleImageUpload(chatId, userId?.toString(), messageId, fileId, isDocument);
+    return handleImageUpload(
+      chatId,
+      userId?.toString(),
+      messageId,
+      fileId,
+      isDocument,
+      mediaGroupId,
+    );
 
   } catch (error) {
     // Log error without exposing secrets
@@ -185,6 +197,7 @@ async function handleCancelCommand(chatId: number) {
   
   return { ok: true };
 }
+  mediaGroupId?: string,
 
 async function handleImageUpload(
   chatId: number,
@@ -278,16 +291,52 @@ async function handleImageUpload(
     session = await addImageToSession(session.id, imageInput);
     const imageCount = session.image_input.length;
 
-    // Send confirmation
-    const confirmText = isDocument
-      ? `✅ Got it (${imageCount} image${imageCount > 1 ? 's' : ''}). Send more photos or press ✅ Done.`
-      : `✅ Added (${imageCount}). For best quality, send as File/Document. Press ✅ Done when ready.`;
+    // Handle media group (album) confirmation
+    if (mediaGroupId) {
+      // Track media group photos
+      if (!mediaGroupTracking.has(mediaGroupId)) {
+        mediaGroupTracking.set(mediaGroupId, {
+          chatId,
+          count: 1,
+          timer: setTimeout(() => {
+            // Send consolidated message after all photos arrive
+            const tracking = mediaGroupTracking.get(mediaGroupId);
+            if (tracking) {
+              sendMediaGroupConfirmation(tracking.chatId, tracking.count, imageCount);
+              mediaGroupTracking.delete(mediaGroupId);
+            }
+          }, 2000), // Wait 2 seconds for all photos
+        });
+      } else {
+        // Increment count for existing media group
+        const tracking = mediaGroupTracking.get(mediaGroupId)!;
+        tracking.count++;
+        mediaGroupTracking.set(mediaGroupId, tracking);
+        
+        // Reset timer
+        clearTimeout(tracking.timer);
+        tracking.timer = setTimeout(() => {
+          const finalTracking = mediaGroupTracking.get(mediaGroupId);
+          if (finalTracking) {
+            sendMediaGroupConfirmation(finalTracking.chatId, finalTracking.count, imageCount);
+            mediaGroupTracking.delete(mediaGroupId);
+          }
+        }, 2000);
+      }
+      
+      console.log(`[webhook] Added photo ${mediaGroupTracking.get(mediaGroupId)!.count} from album ${mediaGroupId} to session ${session.id}`);
+    } else {
+      // Single photo - send immediate confirmation
+      const confirmText = isDocument
+        ? `✅ Got it (${imageCount} image${imageCount > 1 ? 's' : ''}). Send more photos or press ✅ Done.`
+        : `✅ Added (${imageCount}). For best quality, send as File/Document. Press ✅ Done when ready.`;
 
-    await sendMessage(chatId, confirmText, {
-      reply_markup: SESSION_KEYBOARD,
-    });
-
-    console.log(`[webhook] Added image to session ${session.id} (${imageCount} total)`);
+      await sendMessage(chatId, confirmText, {
+        reply_markup: SESSION_KEYBOARD,
+      });
+      
+      console.log(`[webhook] Added image to session ${session.id} (${imageCount} total)`);
+    }
 
   } catch (error: any) {
     console.error('[webhook] Image upload failed:', error);
@@ -517,6 +566,23 @@ async function startSessionGeneration(
   });
 
   console.log(`[webhook] Started provider job ${job.id} for session ${sessionId}`);
+}
+
+async function sendMediaGroupConfirmation(
+  chatId: number,
+  albumCount: number,
+  totalCount: number,
+) {
+  const message = `✅ Got ${albumCount} photo${albumCount > 1 ? 's' : ''} from your album! (${totalCount} total)\n\nSend more or press ✅ Done when ready.`;
+  
+  try {
+    await sendMessage(chatId, message, {
+      reply_markup: SESSION_KEYBOARD,
+    });
+    console.log(`[webhook] Sent confirmation for ${albumCount} photos in album (${totalCount} total in session)`);
+  } catch (error) {
+    console.error('[webhook] Failed to send media group confirmation:', error);
+  }
 }
 
 function isImageDocument(document: any): boolean {

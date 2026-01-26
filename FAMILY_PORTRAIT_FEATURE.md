@@ -33,6 +33,13 @@ User: [sends another photo]
 Bot: ✅ Got it (2 images). Send more photos or press ✅ Done.
 [✅ Done] [❌ Cancel]
 [ℹ️ Tips]
+
+User: [sends 3 photos as album/bulk]
+Bot: ✅ Got 3 photos from your album! (5 total)
+
+Send more or press ✅ Done when ready.
+[✅ Done] [❌ Cancel]
+[ℹ️ Tips]
 ```
 
 ### 3. Submit for Processing
@@ -80,10 +87,19 @@ Run migration:
 - `scripts/add-sessions-table.sql` - Database migration
 
 #### Modified Files
-- `pages/api/telegram/webhook.ts` - Complete rewrite for session management
+- `pages/api/telegram/webhook.ts` - Complete rewrite for session management + media group support
 - `lib/telegram.ts` - Added callback query support
 - `lib/provider.ts` - Multi-image support
 - `pages/api/provider/callback.ts` - Session status updates
+
+### Features
+
+#### Media Group (Album) Support
+When users send multiple photos at once (as an album), Telegram sends them with a `media_group_id`. The bot:
+- Detects photos from the same album
+- Buffers them with a 2-second delay
+- Sends one consolidated message: "✅ Got 3 photos from your album! (5 total)"
+- Avoids spamming separate confirmations for each photo
 
 ### Replicate Integration
 
@@ -188,7 +204,9 @@ No new environment variables required. Uses existing:
 
 ## Migration from Old Workflow
 
-The old single-photo immediate processing is replaced by session-based workflow. To restore old behavior:
+The old single-photoone-by-one → press ✅ Done
+- [ ] Send 3 photos as album (bulk) → verify consolidated message
+- [ ] Send mix of single + album photos → verify correct countscessing is replaced by session-based workflow. To restore old behavior:
 - Revert to `pages/api/telegram/webhook.old.ts`
 
 ## Testing Checklist
