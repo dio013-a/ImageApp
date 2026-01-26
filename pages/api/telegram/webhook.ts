@@ -10,7 +10,6 @@ import {
 } from '../../../lib/telegram';
 import {
   uploadBuffer,
-  buildJobObjectPath,
   guessContentType,
 } from '../../../lib/storage';
 import { startProviderJob } from '../../../lib/provider';
@@ -25,6 +24,16 @@ import {
   type SessionImageInput,
 } from '../../../lib/sessionHelpers';
 import { buildStudioPortraitPrompt } from '../../../lib/promptBuilder';
+import { supabase } from '../../../lib/supabase';
+
+// ============================================================================
+// TYPES & CONSTANTS
+// ============================================================================
+
+interface ImageInput {
+  kind: 'photo' | 'document';
+  fileId: string;
+}
 
 // Inline keyboard for session management
 const SESSION_KEYBOARD = {
@@ -37,9 +46,82 @@ const SESSION_KEYBOARD = {
   ],
 };
 
-// Media group tracking (in-memory, simple approach for stateless functions)
-// Key: mediaGroupId, Value: { chatId, count, timer }
-const mediaGroupTracking = new Map<string, { chatId: number; count: number; timer: ReturnType<typeof setTimeout> }>();
+// ============================================================================
+// IDEMPOTENCY HELPERS
+// ============================================================================
+
+async function isUpdateProcessed(updateId: number): Promise<boolean> {
+  const { data } = await supabase
+    .from('processed_updates')
+    .select('update_id')
+    .eq('update_id', updateId)
+    .single();
+  
+  return !!data;
+}
+
+async function markUpdateProcessed(
+  updateId: number,
+  chatId?: string,
+  updateType?: string,
+): Promise<void> {
+  await supabase
+    .from('processed_updates')
+    .insert({
+      update_id: updateId,
+      chat_id: chatId,
+      update_type: updateType,
+    })
+    .onConflict('update_id')
+    .ignore();
+}
+
+// ============================================================================
+// IMAGE EXTRACTION
+// ============================================================================
+
+function extractImageInput(message: any): ImageInput | null {
+  if (!message) return null;
+
+  // Check for photo (Telegram compressed image)
+  if (message.photo && Array.isArray(message.photo) && message.photo.length > 0) {
+    // Choose largest photo size (last in array)
+    const largestPhoto = message.photo[message.photo.length - 1];
+    return {
+      kind: 'photo',
+      fileId: largestPhoto.file_id,
+    };
+  }
+
+  // Check for document (uncompressed file)
+  if (message.document) {
+    const doc = message.document;
+    const mimeType = doc.mime_type?.toLowerCase() || '';
+    const fileName = doc.file_name?.toLowerCase() || '';
+
+    // Accept if mime type is image/*
+    if (mimeType.startsWith('image/')) {
+      return {
+        kind: 'document',
+        fileId: doc.file_id,
+      };
+    }
+
+    // Fallback: check file extension
+    if (fileName.match(/\.(jpg|jpeg|png|webp|gif)$/i)) {
+      return {
+        kind: 'document',
+        fileId: doc.file_id,
+      };
+    }
+  }
+
+  return null;
+}
+
+// ============================================================================
+// MAIN WEBHOOK HANDLER
+// ============================================================================
 
 export default async function handler(
   req: NextApiRequest,
@@ -50,7 +132,8 @@ export default async function handler(
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  let chatId: number | undefined;
+  const update = req.body;
+  const updateId = update.update_id;
 
   try {
     // Validate Telegram signature (required in production)
@@ -68,105 +151,107 @@ export default async function handler(
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const update = req.body;
-
-    // Handle callback queries (button presses)
-    if (update.callback_query && update.callback_query.id) {
-      return handleCallbackQuery(req, res, update.callback_query);
+    // Idempotency check: skip if already processed
+    if (updateId && await isUpdateProcessed(updateId)) {
+      console.log(`[update] Already processed update_id=${updateId}, skipping`);
+      return res.status(200).json({ ok: true });
     }
 
-    // Extract message data
+    // Determine update type and extract basic info
     const message = update.message || update.edited_message;
-    chatId = message?.chat?.id;
-    const userId = message?.from?.id;
-    const messageId = message?.message_id;
-    const mediaGroupId = message?.media_group_id; // Photos sent as album
+    const callbackQuery = update.callback_query;
+    const chatId = message?.chat?.id || callbackQuery?.message?.chat?.id;
+    const userId = message?.from?.id || callbackQuery?.from?.id;
 
-    // Ignore non-message updates
-    if (!message || !chatId) {
+    let updateType = 'unknown';
+    if (message) updateType = 'message';
+    else if (callbackQuery) updateType = 'callback_query';
+    else if (update.edited_message) updateType = 'edited_message';
+
+    console.log(`[update] type=${updateType} update_id=${updateId} chat_id=${chatId}`);
+
+    // Mark as processed early to prevent retries
+    if (updateId) {
+      await markUpdateProcessed(updateId, chatId?.toString(), updateType);
+    }
+
+    // ========================================================================
+    // DISPATCHER: Route based on update type
+    // ========================================================================
+
+    // 1. CALLBACK QUERY (button presses)
+    if (callbackQuery && callbackQuery.id) {
+      return handleCallbackQuery(res, callbackQuery);
+    }
+
+    // 2. MESSAGE HANDLING
+    if (message && chatId) {
+      // Rate limiting: 10 requests per minute per chat
+      const rateLimit = checkRateLimit({
+        identifier: `telegram:${chatId}`,
+        limit: 10,
+        windowMs: 60 * 1000,
+      });
+      
+      if (!rateLimit.allowed) {
+        await sendMessage(chatId, 'Please slow down. Try again in a minute.');
+        return res.status(200).json({ ok: true });
+      }
+
+      const messageText = message.text?.trim() || '';
+
+      // 2a. /start command - send welcome only
+      if (messageText.startsWith('/start')) {
+        console.log(`[start] chat_id=${chatId}`);
+        return handleStartCommand(res, chatId);
+      }
+
+      // 2b. /cancel command
+      if (messageText.startsWith('/cancel')) {
+        console.log(`[cancel] chat_id=${chatId}`);
+        return handleCancelCommand(res, chatId);
+      }
+
+      // 2c. Image upload (photo or document)
+      const imageInput = extractImageInput(message);
+      if (imageInput) {
+        console.log(`[input] detected kind=${imageInput.kind} chat_id=${chatId} message_id=${message.message_id}`);
+        return handleImageUpload(
+          res,
+          chatId,
+          userId?.toString(),
+          message.message_id,
+          imageInput,
+        );
+      }
+
+      // 2d. Unknown message type - provide guidance
+      console.log(`[update] unhandled message type chat_id=${chatId}`);
+      await sendMessage(
+        chatId,
+        'Please send photos or images. Send /start for instructions.',
+      );
       return res.status(200).json({ ok: true });
     }
 
-    // Rate limiting: 10 requests per minute per chat
-    const rateLimit = checkRateLimit({
-      identifier: `telegram:${chatId}`,
-      limit: 10,
-      windowMs: 60 * 1000,
-    });
-    
-    if (!rateLimit.allowed) {
-      await sendMessage(chatId, 'Please slow down. Try again in a minute.');
-      return res.status(200).json({ ok: true });
-    }
-
-    // Handle /start command
-    if (message.text && message.text.trim().startsWith('/start')) {
-      return handleStartCommand(chatId, userId);
-    }
-
-    // Handle /cancel command
-    if (message.text && message.text.trim().startsWith('/cancel')) {
-      return handleCancelCommand(chatId);
-    }
-
-    // Check for photo or document (document can be high-quality image)
-    const photos = message.photo;
-    const document = message.document;
-    
-    let fileId: string | null = null;
-    let isDocument = false;
-    
-    if (photos && photos.length > 0) {
-      // Select largest photo (last in array)
-      fileId = photos[photos.length - 1].file_id;
-    } else if (document && isImageDocument(document)) {
-      fileId = document.file_id;
-      isDocument = true;
-    }
-
-    if (!fileId) {
-      await sendMessage(chatId, 'Please send a photo or image file.');
-      return res.status(200).json({ ok: true });
-    }
-
-    // Handle image collection for session
-    return handleImageUpload(
-      chatId,
-      userId?.toString(),
-      messageId,
-      fileId,
-      isDocument,
-      mediaGroupId,
-    );
+    // 3. ALL OTHER UPDATES - ignore silently
+    console.log(`[update] ignored type=${updateType} update_id=${updateId}`);
+    return res.status(200).json({ ok: true });
 
   } catch (error) {
     // Log error without exposing secrets
     safeError('[webhook] Error', error);
-
-    // Try to notify user if we have chatId
-    if (chatId) {
-      try {
-        await sendMessage(
-          chatId,
-          'Sorry, something went wrong. Please try again.',
-        );
-      } catch (notifyError) {
-        safeError('[webhook] Failed to notify user', notifyError);
-      }
-    }
 
     // Always return 200 to Telegram to avoid webhook retry storms
     return res.status(200).json({ ok: true });
   }
 }
 
-async function handleStartCommand(chatId: number, userId?: number) {
-  // Create new session
-  const session = await createSession({
-    chatId: chatId.toString(),
-    userId: userId?.toString(),
-  });
+// ============================================================================
+// COMMAND HANDLERS
+// ============================================================================
 
+async function handleStartCommand(res: NextApiResponse, chatId: number) {
   const welcomeText = `Welcome! 🎬
 
 Send me **1–14 photos** of family members.
@@ -180,47 +265,55 @@ I'll create a professional studio family portrait.`;
     reply_markup: SESSION_KEYBOARD,
   });
 
-  console.log(`[webhook] Created session ${session.id} for chat ${chatId}`);
-  return { ok: true };
+  console.log(`[start] Sent welcome to chat_id=${chatId} (no session created yet)`);
+  return res.status(200).json({ ok: true });
 }
 
-async function handleCancelCommand(chatId: number) {
+async function handleCancelCommand(res: NextApiResponse, chatId: number) {
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
     await sendMessage(chatId, 'No active session to cancel. Send /start to begin.');
-    return { ok: true };
+    console.log(`[cancel] No active session for chat_id=${chatId}`);
+  } else {
+    await updateSessionStatus(session.id, 'cancelled');
+    await sendMessage(chatId, 'Session cancelled. Send /start to begin a new one.');
+    console.log(`[cancel] Cancelled session_id=${session.id} for chat_id=${chatId}`);
   }
-
-  await updateSessionStatus(session.id, 'cancelled');
-  await sendMessage(chatId, 'Session cancelled. Send /start to begin a new one.');
   
-  return { ok: true };
+  return res.status(200).json({ ok: true });
 }
 
+// ============================================================================
+// IMAGE UPLOAD HANDLER
+// ============================================================================
+
 async function handleImageUpload(
+  res: NextApiResponse,
   chatId: number,
   userId: string | undefined,
-  messageId: number | undefined,
-  fileId: string,
-  isDocument: boolean,
-  mediaGroupId?: string,
+  messageId: number,
+  imageInput: ImageInput,
 ) {
-  // Get or create session
+  // Get active session (or create one if none exists)
   let session = await getActiveSession(chatId.toString());
   
   if (!session) {
-    // Auto-create session if user sends photo without /start
+    // Create new session on first image
+    console.log(`[session] No active session, creating new for chat_id=${chatId}`);
     session = await createSession({
       chatId: chatId.toString(),
       userId,
     });
+    console.log(`[session] Created session_id=${session.id} for chat_id=${chatId}`);
     
     await sendMessage(
       chatId,
       'Starting a new session. Send more photos or press ✅ Done when ready.',
       { reply_markup: SESSION_KEYBOARD },
     );
+  } else {
+    console.log(`[session] Active session found session_id=${session.id} status=${session.status}`);
   }
 
   // Check if session is still in collecting state
@@ -229,12 +322,14 @@ async function handleImageUpload(
       chatId,
       'Current session is already processing. Please wait or send /start for a new session.',
     );
-    return { ok: true };
+    console.log(`[input] Session ${session.id} not in collecting state, ignoring image`);
+    return res.status(200).json({ ok: true });
   }
 
   try {
     // Download file from Telegram with timeout (45s max)
-    const downloadPromise = downloadFile(fileId);
+    console.log(`[input] Downloading file_id=${imageInput.fileId} kind=${imageInput.kind}`);
+    const downloadPromise = downloadFile(imageInput.fileId);
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('Download timeout')), 45000)
     );
@@ -244,13 +339,15 @@ async function handleImageUpload(
       timeoutPromise,
     ]);
     
+    console.log(`[input] Downloaded ${buffer.length} bytes from Telegram`);
+    
     // Validate file size (max 20MB)
     if (buffer.length > FILE_SIZE_LIMITS.MAX_IMAGE_SIZE) {
       await sendMessage(
         chatId,
         '❌ Image too large. Please send an image smaller than 20MB.',
       );
-      return { ok: true };
+      return res.status(200).json({ ok: true });
     }
 
     // Determine filename and extension
@@ -270,6 +367,7 @@ async function handleImageUpload(
     const objectPath = `sessions/${session.id}/input_${session.image_input.length + 1}${ext}`;
 
     // Upload to Supabase Storage
+    console.log(`[input] Uploading to storage path=${objectPath}`);
     const contentType = guessContentType(filename) || 'application/octet-stream';
     const { bucket, path } = await uploadBuffer({
       path: objectPath,
@@ -278,68 +376,35 @@ async function handleImageUpload(
       upsert: false,
     });
 
-    // Add image to session
-    const imageInput: SessionImageInput = {
-      telegram_file_id: fileId,
-      telegram_message_id: messageId?.toString() || '',
+    console.log(`[input] Uploaded to bucket=${bucket} path=${path}`);
+
+    // Add image to session (with idempotent check via message_id)
+    const sessionImageInput: SessionImageInput = {
+      telegram_file_id: imageInput.fileId,
+      telegram_message_id: messageId.toString(),
       storage_bucket: bucket,
       storage_path: path,
       original_filename: filename,
       added_at: new Date().toISOString(),
     };
 
-    session = await addImageToSession(session.id, imageInput);
+    session = await addImageToSession(session.id, sessionImageInput);
     const imageCount = session.image_input.length;
 
-    // Handle media group (album) confirmation
-    if (mediaGroupId) {
-      // Track media group photos
-      if (!mediaGroupTracking.has(mediaGroupId)) {
-        mediaGroupTracking.set(mediaGroupId, {
-          chatId,
-          count: 1,
-          timer: setTimeout(() => {
-            // Send consolidated message after all photos arrive
-            const tracking = mediaGroupTracking.get(mediaGroupId);
-            if (tracking) {
-              sendMediaGroupConfirmation(tracking.chatId, tracking.count, imageCount);
-              mediaGroupTracking.delete(mediaGroupId);
-            }
-          }, 2000), // Wait 2 seconds for all photos
-        });
-      } else {
-        // Increment count for existing media group
-        const tracking = mediaGroupTracking.get(mediaGroupId)!;
-        tracking.count++;
-        mediaGroupTracking.set(mediaGroupId, tracking);
-        
-        // Reset timer
-        clearTimeout(tracking.timer);
-        tracking.timer = setTimeout(() => {
-          const finalTracking = mediaGroupTracking.get(mediaGroupId);
-          if (finalTracking) {
-            sendMediaGroupConfirmation(finalTracking.chatId, finalTracking.count, imageCount);
-            mediaGroupTracking.delete(mediaGroupId);
-          }
-        }, 2000);
-      }
-      
-      console.log(`[webhook] Added photo ${mediaGroupTracking.get(mediaGroupId)!.count} from album ${mediaGroupId} to session ${session.id}`);
-    } else {
-      // Single photo - send immediate confirmation
-      const confirmText = isDocument
-        ? `✅ Got it (${imageCount} image${imageCount > 1 ? 's' : ''}). Send more photos or press ✅ Done.`
-        : `✅ Added (${imageCount}). For best quality, send as File/Document. Press ✅ Done when ready.`;
+    console.log(`[input] Added message_id=${messageId} to session_id=${session.id} (${imageCount} total)`);
 
-      await sendMessage(chatId, confirmText, {
-        reply_markup: SESSION_KEYBOARD,
-      });
-      
-      console.log(`[webhook] Added image to session ${session.id} (${imageCount} total)`);
-    }
+    // Send confirmation
+    const isDocument = imageInput.kind === 'document';
+    const confirmText = isDocument
+      ? `✅ Got it (${imageCount} image${imageCount > 1 ? 's' : ''}). Send more photos or press ✅ Done.`
+      : `✅ Added (${imageCount}). For best quality, send as File/Document. Press ✅ Done when ready.`;
+
+    await sendMessage(chatId, confirmText, {
+      reply_markup: SESSION_KEYBOARD,
+    });
 
   } catch (error: any) {
-    console.error('[webhook] Image upload failed:', error);
+    safeError('[input] Image upload failed', error);
     
     if (error.message === 'Download timeout') {
       await sendMessage(
@@ -354,16 +419,19 @@ async function handleImageUpload(
     } else {
       await sendMessage(
         chatId,
-        '❌ I could not use that file. Please send a JPG or PNG photo.',
+        '❌ I could not process that file. Please send a JPG or PNG photo.',
       );
     }
   }
 
-  return { ok: true };
+  return res.status(200).json({ ok: true });
 }
 
+// ============================================================================
+// CALLBACK QUERY HANDLER (Button Presses)
+// ============================================================================
+
 async function handleCallbackQuery(
-  req: NextApiRequest,
   res: NextApiResponse,
   callbackQuery: any,
 ) {
@@ -374,8 +442,11 @@ async function handleCallbackQuery(
   const data = callbackQuery.data;
 
   if (!chatId || !data) {
+    console.log(`[callback] Missing chat_id or data, ignoring`);
     return res.status(200).json({ ok: true });
   }
+
+  console.log(`[callback] data=${data} chat_id=${chatId} callback_id=${callbackId}`);
 
   try {
     if (data === 'session:done') {
@@ -384,9 +455,11 @@ async function handleCallbackQuery(
       await handleSessionCancel(chatId, messageId, callbackId);
     } else if (data === 'session:tips') {
       await handleSessionTips(chatId, callbackId);
+    } else {
+      console.log(`[callback] Unknown data=${data}`);
     }
   } catch (error) {
-    safeError('[webhook] Callback query error', error);
+    safeError('[callback] Error handling callback query', error);
     try {
       await answerCallbackQuery(callbackId, {
         text: 'Something went wrong. Please try again.',
@@ -394,12 +467,16 @@ async function handleCallbackQuery(
       });
     } catch (answerError) {
       // Ignore if answerCallbackQuery fails (e.g., already answered or expired)
-      safeError('[webhook] Failed to answer callback query', answerError);
+      safeError('[callback] Failed to answer callback query', answerError);
     }
   }
 
   return res.status(200).json({ ok: true });
 }
+
+// ============================================================================
+// SESSION ACTION HANDLERS
+// ============================================================================
 
 async function handleSessionDone(
   chatId: number,
@@ -410,34 +487,52 @@ async function handleSessionDone(
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
+    console.log(`[done] No active session for chat_id=${chatId}`);
     try {
       await answerCallbackQuery(callbackId, {
         text: 'No active session. Send /start to begin.',
         show_alert: true,
       });
     } catch (err) {
-      safeError('[webhook] Failed to answer callback query', err);
+      safeError('[done] Failed to answer callback query', err);
     }
     return;
   }
+
+  console.log(`[done] session_id=${session.id} status=${session.status} image_count=${session.image_input.length}`);
 
   const imageCount = session.image_input.length;
 
   // Validate image count
   if (imageCount === 0) {
+    console.log(`[done] Session ${session.id} has no images, asking user to upload`);
     try {
       await answerCallbackQuery(callbackId, {
         text: 'Please send at least one photo first.',
         show_alert: true,
       });
     } catch (err) {
-      safeError('[webhook] Failed to answer callback query', err);
+      safeError('[done] Failed to answer callback query', err);
+    }
+    return;
+  }
+
+  // Idempotency: check if already processing
+  if (session.status === 'processing') {
+    console.log(`[done] Session ${session.id} already processing, skipping duplicate`);
+    try {
+      await answerCallbackQuery(callbackId, {
+        text: 'Already processing your images...',
+      });
+    } catch (err) {
+      safeError('[done] Failed to answer callback query', err);
     }
     return;
   }
 
   // Update session status to processing
   await updateSessionStatus(session.id, 'processing');
+  console.log(`[done] Updated session ${session.id} to processing`);
 
   // Remove keyboard from previous message
   if (messageId) {
@@ -453,7 +548,7 @@ async function handleSessionDone(
       text: `Processing ${imageCount} image${imageCount > 1 ? 's' : ''}...`,
     });
   } catch (err) {
-    safeError('[webhook] Failed to answer callback query', err);
+    safeError('[done] Failed to answer callback query', err);
   }
 
   await sendMessage(
@@ -464,8 +559,9 @@ async function handleSessionDone(
   // Start the generation job
   try {
     await startSessionGeneration(session.id, chatId.toString(), userId?.toString());
+    console.log(`[done] Started generation for session_id=${session.id}`);
   } catch (error: any) {
-    console.error('[webhook] Failed to start generation:', error);
+    safeError('[done] Failed to start generation', error);
     await updateSessionStatus(session.id, 'failed', {
       errorMessage: error?.message || 'Failed to start generation',
     });
@@ -487,17 +583,19 @@ async function handleSessionCancel(
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
+    console.log(`[cancel] No active session for chat_id=${chatId}`);
     try {
       await answerCallbackQuery(callbackId, {
         text: 'No active session to cancel.',
       });
     } catch (err) {
-      safeError('[webhook] Failed to answer callback query', err);
+      safeError('[cancel] Failed to answer callback query', err);
     }
     return;
   }
 
   await updateSessionStatus(session.id, 'cancelled');
+  console.log(`[cancel] Cancelled session_id=${session.id}`);
 
   // Remove keyboard
   if (messageId) {
@@ -513,7 +611,7 @@ async function handleSessionCancel(
       text: 'Session cancelled.',
     });
   } catch (err) {
-    safeError('[webhook] Failed to answer callback query', err);
+    safeError('[cancel] Failed to answer callback query', err);
   }
 
   await sendMessage(chatId, 'Session cancelled. Send /start to begin a new one.');
@@ -533,10 +631,16 @@ Press ✅ Done when ready!`;
   try {
     await answerCallbackQuery(callbackId);
   } catch (err) {
-    safeError('[webhook] Failed to answer callback query', err);
+    safeError('[tips] Failed to answer callback query', err);
   }
+  
   await sendMessage(chatId, tipsText, { parse_mode: 'Markdown' });
+  console.log(`[tips] Sent tips to chat_id=${chatId}`);
 }
+
+// ============================================================================
+// SESSION GENERATION
+// ============================================================================
 
 async function startSessionGeneration(
   sessionId: string,
@@ -551,7 +655,7 @@ async function startSessionGeneration(
 
   // Idempotency: check if job already created for this session
   if (session.job_id) {
-    console.log(`[webhook] Session ${sessionId} already has job ${session.job_id}, skipping duplicate creation`);
+    console.log(`[generation] Session ${sessionId} already has job ${session.job_id}, skipping duplicate`);
     return;
   }
 
@@ -560,7 +664,7 @@ async function startSessionGeneration(
     imageCount: session.image_input.length,
   });
 
-  console.log(`[webhook] Generated prompt for session ${sessionId}: ${prompt}`);
+  console.log(`[generation] session_id=${sessionId} prompt="${prompt}"`);
 
   // Generate webhook secret for callback
   const webhookSecret = crypto.randomBytes(16).toString('hex');
@@ -577,6 +681,8 @@ async function startSessionGeneration(
     },
   });
 
+  console.log(`[generation] Created job_id=${job.id} for session_id=${sessionId}`);
+
   // Update session with job ID and prompt
   await updateSessionStatus(sessionId, 'processing', {
     jobId: job.id,
@@ -588,7 +694,7 @@ async function startSessionGeneration(
     .filter((img) => img.storage_path && img.storage_path.trim() !== '')
     .map((img) => ({
       bucket: img.storage_bucket,
-      path: img.storage_path!, // Safe to use ! because we filtered above
+      path: img.storage_path!,
     }));
 
   // Fail early if no valid images
@@ -599,10 +705,12 @@ async function startSessionGeneration(
     throw new Error('No valid images found. All images are missing storage paths.');
   }
 
+  console.log(`[generation] Starting provider job with ${inputImages.length} images`);
+
   // Start provider job with multiple images
   await startProviderJob({
     jobId: job.id,
-    inputImages, // Pass array of images
+    inputImages,
     prompt,
     modelVersion: process.env.REPLICATE_MODEL_VERSION,
     settings: {
@@ -613,32 +721,5 @@ async function startSessionGeneration(
     },
   });
 
-  console.log(`[webhook] Started provider job ${job.id} for session ${sessionId}`);
-}
-
-async function sendMediaGroupConfirmation(
-  chatId: number,
-  albumCount: number,
-  totalCount: number,
-) {
-  const message = `✅ Got ${albumCount} photo${albumCount > 1 ? 's' : ''} from your album! (${totalCount} total)\n\nSend more or press ✅ Done when ready.`;
-  
-  try {
-    await sendMessage(chatId, message, {
-      reply_markup: SESSION_KEYBOARD,
-    });
-    console.log(`[webhook] Sent confirmation for ${albumCount} photos in album (${totalCount} total in session)`);
-  } catch (error) {
-    console.error('[webhook] Failed to send media group confirmation:', error);
-  }
-}
-
-function isImageDocument(document: any): boolean {
-  const mimeType = document.mime_type?.toLowerCase() || '';
-  return (
-    mimeType.startsWith('image/') ||
-    mimeType === 'image/jpeg' ||
-    mimeType === 'image/png' ||
-    mimeType === 'image/jpg'
-  );
+  console.log(`[generation] Started provider job ${job.id} for session ${sessionId}`);
 }
