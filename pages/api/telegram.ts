@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+import { getConfig } from '../../lib/config';
 
 /**
  * Telegram webhook handler
@@ -33,11 +34,14 @@ interface TelegramUpdate {
 }
 
 async function sendTelegramMessage(chatId: number, text: string): Promise<void> {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  
-  if (!botToken) {
-    console.error('[telegram] ERROR: TELEGRAM_BOT_TOKEN not configured');
-    throw new Error('TELEGRAM_BOT_TOKEN not configured');
+  let botToken: string | undefined;
+
+  try {
+    botToken = getConfig().TG_TOKEN;
+  } catch (err) {
+    console.error('[telegram] ERROR: TG_TOKEN not configured');
+    // Fail loudly but safely: do not throw so the webhook returns 200 to Telegram
+    return;
   }
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
@@ -56,13 +60,15 @@ async function sendTelegramMessage(chatId: number, text: string): Promise<void> 
     
     if (!response.ok || !data.ok) {
       console.error('[telegram] Failed to send message:', data);
-      throw new Error(`Telegram API error: ${data.description || 'Unknown error'}`);
+      // Log error but don't throw to keep webhook responses 200
+      return;
     }
     
     console.log('[telegram] Message sent successfully to chat', chatId);
   } catch (error) {
     console.error('[telegram] Error sending message:', error);
-    throw error;
+    // Don't rethrow: handler will still return 200 to Telegram
+    return;
   }
 }
 

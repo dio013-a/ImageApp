@@ -6,7 +6,7 @@
 declare global {
   namespace NodeJS {
     interface ProcessEnv {
-      TELEGRAM_BOT_TOKEN?: string;
+      TG_TOKEN?: string;
       TG_WEBHOOK_SECRET?: string;
       REPLICATE_MODEL_VERSION?: string;
       NODE_ENV?: 'development' | 'production' | 'test';
