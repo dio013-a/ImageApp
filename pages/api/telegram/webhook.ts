@@ -354,7 +354,7 @@ async function handleImageUpload(
     } else {
       await sendMessage(
         chatId,
-        '❌ I couldn't use that file. Please send a JPG or PNG photo.',
+        '❌ I could not use that file. Please send a JPG or PNG photo.',
       );
     }
   }
@@ -454,7 +454,7 @@ async function handleSessionDone(
     });
     await sendMessage(
       chatId,
-      '❌ I couldn't create the portrait. Please try again in a few minutes.',
+      '❌ I could not create the portrait. Please try again in a few minutes.',
     );
   }
 }
