@@ -1,4 +1,4 @@
-import { getSupabase } from './supabase';
+import { supabase } from './supabase';
 
 export type SessionStatus = 'collecting' | 'processing' | 'done' | 'failed' | 'cancelled';
 
@@ -32,8 +32,6 @@ export interface Session {
  * Get active session for a chat (collecting or processing)
  */
 export async function getActiveSession(chatId: string): Promise<Session | null> {
-  const supabase = getSupabase();
-  
   const { data, error } = await supabase
     .from('sessions')
     .select('*')
@@ -61,8 +59,6 @@ export async function createSession(params: {
   chatId: string;
   userId?: string;
 }): Promise<Session> {
-  const supabase = getSupabase();
-  
   const { data, error } = await supabase
     .from('sessions')
     .insert({
@@ -88,8 +84,6 @@ export async function addImageToSession(
   sessionId: string,
   imageInput: SessionImageInput,
 ): Promise<Session> {
-  const supabase = getSupabase();
-  
   // First, get current session to check image count
   const { data: session, error: fetchError } = await supabase
     .from('sessions')
@@ -147,8 +141,6 @@ export async function updateSessionStatus(
     prompt?: string;
   },
 ): Promise<void> {
-  const supabase = getSupabase();
-  
   const updateData: Record<string, any> = { status };
   
   if (options?.errorMessage) {
@@ -175,8 +167,6 @@ export async function updateSessionStatus(
  * Get session by ID
  */
 export async function getSessionById(sessionId: string): Promise<Session | null> {
-  const supabase = getSupabase();
-  
   const { data, error } = await supabase
     .from('sessions')
     .select('*')
@@ -197,8 +187,6 @@ export async function getSessionById(sessionId: string): Promise<Session | null>
  * Get session by job ID
  */
 export async function getSessionByJobId(jobId: string): Promise<Session | null> {
-  const supabase = getSupabase();
-  
   const { data, error } = await supabase
     .from('sessions')
     .select('*')
