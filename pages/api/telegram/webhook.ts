@@ -65,15 +65,18 @@ async function markUpdateProcessed(
   chatId?: string,
   updateType?: string,
 ): Promise<void> {
-  await supabase
-    .from('processed_updates')
-    .insert({
-      update_id: updateId,
-      chat_id: chatId,
-      update_type: updateType,
-    })
-    .onConflict('update_id')
-    .ignore();
+  try {
+    await supabase
+      .from('processed_updates')
+      .insert({
+        update_id: updateId,
+        chat_id: chatId,
+        update_type: updateType,
+      });
+  } catch (error) {
+    // Ignore duplicate key errors (already processed)
+    // All other errors are also ignored to prevent webhook failures
+  }
 }
 
 // ============================================================================
