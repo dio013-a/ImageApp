@@ -447,15 +447,18 @@ async function handleSessionDone(
   // Start the generation job
   try {
     await startSessionGeneration(session.id, chatId.toString(), userId?.toString());
-  } catch (error) {
+  } catch (error: any) {
     console.error('[webhook] Failed to start generation:', error);
     await updateSessionStatus(session.id, 'failed', {
-      errorMessage: 'Failed to start generation',
+      errorMessage: error?.message || 'Failed to start generation',
     });
-    await sendMessage(
-      chatId,
-      '❌ I could not create the portrait. Please try again in a few minutes.',
-    );
+    
+    // Check if it's the "no valid images" error
+    const errorMsg = error?.message?.includes('storage paths')
+      ? '❌ I could not process the images. Please resend them as File/Document and try again.'
+      : '❌ I could not create the portrait. Please try again in a few minutes.';
+    
+    await sendMessage(chatId, errorMsg);
   }
 }
 
@@ -545,11 +548,21 @@ async function startSessionGeneration(
     prompt,
   });
 
-  // Prepare multiple images for Replicate
-  const inputImages = session.image_input.map((img) => ({
-    bucket: img.storage_bucket,
-    path: img.storage_path,
-  }));
+  // Prepare multiple images for Replicate - filter out any without valid paths
+  const inputImages = session.image_input
+    .filter((img) => img.storage_path && img.storage_path.trim() !== '')
+    .map((img) => ({
+      bucket: img.storage_bucket,
+      path: img.storage_path!, // Safe to use ! because we filtered above
+    }));
+
+  // Fail early if no valid images
+  if (inputImages.length === 0) {
+    await updateSessionStatus(sessionId, 'failed', {
+      errorMessage: 'No valid images with storage paths',
+    });
+    throw new Error('No valid images found. All images are missing storage paths.');
+  }
 
   // Start provider job with multiple images
   await startProviderJob({
