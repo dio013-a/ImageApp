@@ -11,6 +11,9 @@ import {
   buildJobObjectPath,
   guessContentType,
 } from '../../../lib/storage';
+import { startProviderJob } from '../../../lib/provider';
+import { checkRateLimit } from '../../../lib/rateLimit';
+import { FILE_SIZE_LIMITS } from '../../../lib/validation';
 
 export default async function handler(
   req: NextApiRequest,
@@ -24,6 +27,15 @@ export default async function handler(
   let chatId: number | undefined;
 
   try {
+    // Validate Telegram signature
+    const telegramSignature = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
+    const secretToken = process.env.TG_WEBHOOK_SECRET;
+    
+    if (secretToken && telegramSignature !== secretToken) {
+      console.warn('[webhook] Invalid Telegram signature');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
     const update = req.body;
 
     // Extract message data
@@ -34,6 +46,18 @@ export default async function handler(
 
     // Ignore non-message updates
     if (!message || !chatId) {
+      return res.status(200).json({ ok: true });
+    }
+
+    // Rate limiting: 10 requests per minute per chat
+    const rateLimit = checkRateLimit({
+      identifier: `telegram:${chatId}`,
+      limit: 10,
+      windowMs: 60 * 1000,
+    });
+    
+    if (!rateLimit.allowed) {
+      await sendMessage(chatId, 'Please slow down. Try again in a minute.');
       return res.status(200).json({ ok: true });
     }
 
@@ -59,6 +83,12 @@ export default async function handler(
 
     // Download file from Telegram
     const { buffer, file_path, file_size } = await downloadFile(fileId);
+    
+    // Validate file size (max 20MB)
+    if (buffer.length > FILE_SIZE_LIMITS.MAX_IMAGE_SIZE) {
+      await sendMessage(chatId, 'Sorry, the image is too large. Please send an image smaller than 20MB.');
+      return res.status(200).json({ ok: true });
+    }
 
     // Determine filename and extension
     let filename = 'original.jpg';
@@ -124,6 +154,23 @@ export default async function handler(
       await updateJob(job.id, {
         telegram_message_id: processingMsg.message_id.toString(),
       });
+    }
+
+    // Start the provider job
+    try {
+      await startProviderJob({
+        jobId: job.id,
+        inputImage: { bucket, path },
+        modelVersion: process.env.REPLICATE_MODEL_VERSION,
+      });
+      console.log(`[webhook] Started provider job for ${job.id}`);
+    } catch (providerError) {
+      console.error('[webhook] Failed to start provider job:', providerError);
+      await sendMessage(
+        chatId,
+        'Sorry, failed to start processing. Please try again.',
+      );
+      return res.status(200).json({ ok: true });
     }
 
     return res.status(200).json({ ok: true });

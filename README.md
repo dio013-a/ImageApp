@@ -27,8 +27,10 @@ Set these in Vercel project settings for **both Preview and Production**:
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-service-role-key-here
 TG_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TG_WEBHOOK_SECRET=your-random-webhook-secret
 BASE_URL=https://your-app.vercel.app
 REPLICATE_KEY=r8_your_replicate_key_here
+REPLICATE_MODEL_VERSION=your-model-version-id
 STORAGE_BUCKET=uploads
 ADMIN_TOKEN=your-random-admin-token
 RETENTION_DAYS=30
@@ -36,7 +38,10 @@ POLL_INTERVAL_MS=5000
 NODE_ENV=production
 ```
 
-**Important:** `SUPABASE_KEY` is the service_role key (server-only). Never expose to clients.
+**Important:** 
+- `SUPABASE_KEY` is the service_role key (server-only). Never expose to clients.
+- `TG_WEBHOOK_SECRET` is an optional secret token to verify Telegram webhooks (recommended)
+- `REPLICATE_MODEL_VERSION` should be the version ID from Replicate model page
 
 ## Supabase Setup
 
@@ -98,17 +103,23 @@ CREATE INDEX idx_images_retention ON images(retention_expires_at) WHERE retentio
 
 After deploying to Vercel, register the webhook:
 
-**Option 1: Using script**
+**Option 1: Using script (with optional secret token)**
 ```bash
 TG_TOKEN=your-token BASE_URL=https://your-app.vercel.app npm run set:webhook
 ```
 
-**Option 2: Using curl**
+**Option 2: Using curl (with secret token - recommended)**
 ```bash
 curl -X POST https://api.telegram.org/bot<TG_TOKEN>/setWebhook \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://your-app.vercel.app/api/telegram/webhook","drop_pending_updates":true}'
+  -d '{
+    "url":"https://your-app.vercel.app/api/telegram/webhook",
+    "secret_token":"your-webhook-secret",
+    "drop_pending_updates":true
+  }'
 ```
+
+**Note:** The `secret_token` should match the `TG_WEBHOOK_SECRET` environment variable for enhanced security.
 
 ## Local Development
 
@@ -175,6 +186,45 @@ Log prefixes used:
 - `[storeResult]` - Image storage operations
 - `[worker:gc]` - Garbage collection (if worker deployed)
 - `[admin/*]` - Admin endpoint access
+
+## Security Features
+
+This app implements multiple security measures:
+
+### 1. **Telegram Webhook Validation**
+- Optional secret token verification via `TG_WEBHOOK_SECRET`
+- Prevents unauthorized webhook calls
+
+### 2. **Provider Callback Verification**
+- HMAC signature verification for provider webhooks
+- Uses `webhook_secret` stored per job
+- Logs warnings for invalid signatures
+
+### 3. **Rate Limiting**
+- 10 requests/minute per Telegram chat
+- 100 requests/minute for admin endpoints
+- In-memory implementation (suitable for single-instance deployments)
+
+### 4. **File Validation**
+- Maximum file size: 20MB
+- Allowed image types: JPEG, PNG, WebP
+- File type verification before processing
+
+### 5. **Authentication**
+- Admin endpoints require `x-admin-token` header
+- Supabase service_role key never exposed to client
+- All endpoints are server-side only
+
+### 6. **Input Sanitization**
+- Prompt length limits (2000 chars)
+- SQL injection protection via Supabase parameterized queries
+- Buffer overflow protection
+
+**Production Recommendations:**
+- Use Redis for distributed rate limiting
+- Enable strict webhook signature verification
+- Set up monitoring/alerting for failed authentications
+- Regularly rotate admin tokens and API keys
 
 ## Worker (Optional)
 

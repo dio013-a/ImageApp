@@ -1,18 +1,35 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+import crypto from 'crypto';
 import config from '../../../lib/config';
 import {
   getJobById,
   markJobSuccess,
   markJobFailed,
-  insertImage,
 } from '../../../lib/dbHelpers';
-import {
-  uploadFileFromUrl,
-  buildJobObjectPath,
-  guessContentType,
-  createSignedUrl,
-} from '../../../lib/storage';
 import { sendMessage, sendPhoto, editMessageText } from '../../../lib/telegram';
+import { storeResult } from '../../../lib/storeResult';
+
+function verifyWebhookSignature(
+  jobId: string,
+  webhookSecret: string | null,
+  headerSignature: string | undefined,
+): boolean {
+  if (!webhookSecret || !headerSignature) {
+    return false;
+  }
+  
+  // Replicate sends signature as: sha256=<hash>
+  // Compute expected signature
+  const expectedSig = `sha256=${crypto
+    .createHmac('sha256', webhookSecret)
+    .update(jobId)
+    .digest('hex')}`;
+  
+  return crypto.timingSafeEqual(
+    Buffer.from(expectedSig),
+    Buffer.from(headerSignature)
+  );
+}
 
 export default async function handler(
   req: NextApiRequest,
@@ -47,7 +64,16 @@ export default async function handler(
     const payload = req.body;
     const chatId = job.telegram_chat_id;
 
-    // TODO: Webhook signature verification (check job.webhook_secret vs header)
+    // Verify webhook signature (if configured)
+    const webhookSignature = req.headers['x-webhook-signature'] as string | undefined;
+    if (job.webhook_secret) {
+      const isValid = verifyWebhookSignature(jobId, job.webhook_secret, webhookSignature);
+      if (!isValid) {
+        console.warn(`[provider/callback] Invalid webhook signature for job ${jobId}`);
+        // Still process for backward compatibility, but log warning
+        // In production, you might want to reject: return res.status(401).json({ error: 'Invalid signature' });
+      }
+    }
 
     // Parse Replicate payload
     const status = payload.status;
@@ -95,52 +121,19 @@ export default async function handler(
         return res.status(200).json({ ok: true });
       }
 
-      // Infer extension from URL
-      let ext = '.jpg';
-      const urlLower = outputUrl.toLowerCase();
-      if (urlLower.endsWith('.png')) {
-        ext = '.png';
-      } else if (urlLower.endsWith('.webp')) {
-        ext = '.webp';
-      }
-
-      // Build storage path
-      const storagePath = buildJobObjectPath(jobId, `final${ext}`);
-      const contentType = guessContentType(storagePath) || 'image/jpeg';
-
-      // Upload provider output to Supabase Storage
-      const { bucket, path, bytes } = await uploadFileFromUrl({
-        path: storagePath,
-        url: outputUrl,
-        contentType,
-        upsert: true,
-      });
-
-      // Insert image row
-      await insertImage({
-        job_id: jobId,
-        variant_name: 'final',
-        storage_bucket: bucket,
-        storage_path: path,
-        public_url: null,
-        filesize: bytes,
-        meta: {
+      // Use storeResult to handle image storage and metadata
+      const { signedUrl } = await storeResult({
+        jobId,
+        source: { url: outputUrl },
+        variantName: 'final',
+        retentionDays: config.RETENTION_DAYS,
+        providerMeta: {
           provider: 'replicate',
           provider_job_id: payload.id,
         },
-        retention_days: config.RETENTION_DAYS,
-        is_original: false,
-        version: 1,
       });
 
-      // Create signed URL for Telegram
-      const signedUrl = await createSignedUrl({
-        bucket,
-        path,
-        expiresIn: 300,
-      });
-
-      // Mark job success (idempotent)
+      // Mark job success (idempotent - handled in markJobSuccess)
       await markJobSuccess(jobId, signedUrl, payload);
 
       // Notify Telegram

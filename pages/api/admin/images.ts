@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import config from '../../../lib/config';
 import { supabase } from '../../../lib/supabase';
+import { checkRateLimit } from '../../../lib/rateLimit';
 
 export default async function handler(
   req: NextApiRequest,
@@ -14,6 +15,18 @@ export default async function handler(
   const adminToken = req.headers['x-admin-token'];
   if (!config.ADMIN_TOKEN || adminToken !== config.ADMIN_TOKEN) {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // Rate limiting for admin endpoints
+  const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0] || 'unknown';
+  const rateLimit = checkRateLimit({
+    identifier: `admin:${clientIp}`,
+    limit: 100,
+    windowMs: 60 * 1000,
+  });
+  
+  if (!rateLimit.allowed) {
+    return res.status(429).json({ error: 'Too many requests' });
   }
 
   try {

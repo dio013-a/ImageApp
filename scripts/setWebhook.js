@@ -6,16 +6,28 @@ async function setWebhook() {
 
   const TG_TOKEN = config.TG_TOKEN;
   const webhookUrl = `${config.BASE_URL}/api/telegram/webhook`;
+  const secretToken = process.env.TG_WEBHOOK_SECRET;
 
   console.log(`Setting webhook to: ${webhookUrl}`);
+  if (secretToken) {
+    console.log('Secret token: configured ✓');
+  } else {
+    console.warn('Warning: No TG_WEBHOOK_SECRET set - webhook will not be verified');
+  }
+
+  const payload = {
+    url: webhookUrl,
+    drop_pending_updates: true,
+  };
+  
+  if (secretToken) {
+    payload.secret_token = secretToken;
+  }
 
   const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/setWebhook`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url: webhookUrl,
-      drop_pending_updates: true,
-    }),
+    body: JSON.stringify(payload),
   });
 
   const data = await res.json();
