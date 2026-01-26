@@ -22,4 +22,31 @@ declare module 'next' {
     setHeader(name: string, value: string | number | readonly string[]): void;
     end(): void;
   }
+
+  export interface GetServerSidePropsContext<
+    Q extends { [key: string]: string | string[] } = { [key: string]: string | string[] }
+  > {
+    req: NextApiRequest;
+    res: NextApiResponse;
+    params?: Q;
+    query: Q;
+    resolvedUrl: string;
+  }
+
+  export interface GetServerSidePropsResult<P> {
+    props?: P;
+    redirect?: {
+      destination: string;
+      permanent?: boolean;
+      statusCode?: number;
+    };
+    notFound?: boolean;
+  }
+
+  export type GetServerSideProps<
+    P extends { [key: string]: any } = { [key: string]: any },
+    Q extends { [key: string]: string | string[] } = { [key: string]: string | string[] }
+  > = (
+    context: GetServerSidePropsContext<Q>
+  ) => Promise<GetServerSidePropsResult<P>>;
 }
