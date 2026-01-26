@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import sharp from 'sharp';
-import config from './config';
+import { getConfig } from './config';
 import { insertImage, updateJob, getJobById } from './dbHelpers';
 import {
   uploadBuffer,
@@ -8,6 +8,7 @@ import {
   createSignedUrl,
   guessContentType,
 } from './storage';
+import { isValidProviderUrl } from './validation';
 
 export type ResultSource =
   | { url: string }
@@ -62,7 +63,7 @@ export async function storeResult(
 ): Promise<StoreResultOutput> {
   try {
     const variantName = params.variantName ?? 'final';
-    const retentionDays = params.retentionDays ?? config.RETENTION_DAYS;
+    const retentionDays = params.retentionDays ?? getConfig().RETENTION_DAYS;
 
     // Determine filename
     let filename: string;
@@ -87,11 +88,16 @@ export async function storeResult(
     let sourceContentType: string | undefined;
 
     if ('url' in params.source) {
+      // Validate URL to prevent SSRF attacks
+      if (!isValidProviderUrl(params.source.url)) {
+        throw new Error('[storeResult] Invalid or untrusted provider URL');
+      }
+      
       // Download from URL
       const res = await fetch(params.source.url);
       if (!res.ok) {
         throw new Error(
-          `[storeResult] download failed: HTTP ${res.status} ${res.statusText}`,
+          `[storeResult] download failed: HTTP ${res.status}`,
         );
       }
       const arrayBuffer = await res.arrayBuffer();

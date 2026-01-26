@@ -1,7 +1,7 @@
 // Server-only Supabase client using service_role key. Never expose to client bundles.
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import config from './config';
+import { getConfig } from './config';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -9,6 +9,7 @@ declare global {
 }
 
 if (!globalThis.__supabase_client) {
+  const config = getConfig();
   globalThis.__supabase_client = createClient(
     config.SUPABASE_URL,
     config.SUPABASE_KEY,

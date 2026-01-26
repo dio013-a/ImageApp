@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import config from '../../../lib/config';
+import { getConfig } from '../../../lib/config';
 import { supabase } from '../../../lib/supabase';
 import { checkRateLimit } from '../../../lib/rateLimit';
 
@@ -12,6 +12,7 @@ export default async function handler(
   }
 
   // Check ADMIN_TOKEN
+  const config = getConfig();
   const adminToken = req.headers['x-admin-token'];
   if (!config.ADMIN_TOKEN || adminToken !== config.ADMIN_TOKEN) {
     return res.status(401).json({ error: 'Unauthorized' });

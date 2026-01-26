@@ -1,4 +1,4 @@
-import config from './config';
+import { getConfig } from './config';
 import { markJobRunning, updateJob } from './dbHelpers';
 import { createSignedUrl } from './storage';
 
@@ -21,6 +21,7 @@ export interface StartJobResult {
 }
 
 async function startReplicateJob(params: StartJobParams): Promise<StartJobResult> {
+  const config = getConfig();
   if (!config.REPLICATE_KEY) {
     throw new Error('[replicate:start] REPLICATE_KEY not configured');
   }

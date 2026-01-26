@@ -2,7 +2,8 @@ const fetch = require('undici').fetch;
 
 async function setWebhook() {
   // Load config - this will throw if required env vars are missing
-  const config = require('../lib/config').default;
+  const { getConfig } = require('../lib/config');
+  const config = getConfig();
 
   const TG_TOKEN = config.TG_TOKEN;
   const webhookUrl = `${config.BASE_URL}/api/telegram/webhook`;

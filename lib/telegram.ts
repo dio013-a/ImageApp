@@ -1,10 +1,15 @@
-import config from './config';
+import { getConfig } from './config';
 
-const TG_API_BASE = `https://api.telegram.org/bot${config.TG_TOKEN}`;
-const TG_FILE_BASE = `https://api.telegram.org/file/bot${config.TG_TOKEN}`;
+function getTgApiBase(): string {
+  return `https://api.telegram.org/bot${getConfig().TG_TOKEN}`;
+}
+
+function getTgFileBase(): string {
+  return `https://api.telegram.org/file/bot${getConfig().TG_TOKEN}`;
+}
 
 async function tgPost<T>(method: string, body: any): Promise<T> {
-  const res = await fetch(`${TG_API_BASE}/${method}`, {
+  const res = await fetch(`${getTgApiBase()}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -27,7 +32,7 @@ async function tgPost<T>(method: string, body: any): Promise<T> {
 }
 
 async function tgGet<T>(methodWithQuery: string): Promise<T> {
-  const res = await fetch(`${TG_API_BASE}/${methodWithQuery}`);
+  const res = await fetch(`${getTgApiBase()}/${methodWithQuery}`);
 
   if (!res.ok) {
     throw new Error(
@@ -106,7 +111,7 @@ export async function getFile(
 }
 
 export async function downloadFileByPath(filePath: string): Promise<Buffer> {
-  const res = await fetch(`${TG_FILE_BASE}/${filePath}`);
+  const res = await fetch(`${getTgFileBase()}/${filePath}`);
 
   if (!res.ok) {
     throw new Error(
@@ -134,7 +139,7 @@ export async function downloadFile(fileId: string): Promise<{
 }
 
 export function buildFileUrl(filePath: string): string {
-  return `${TG_FILE_BASE}/${filePath}`;
+  return `${getTgFileBase()}/${filePath}`;
 }
 
 export default {

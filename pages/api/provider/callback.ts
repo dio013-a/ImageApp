@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
-import config from '../../../lib/config';
+import { getConfig } from '../../../lib/config';
 import {
   getJobById,
   markJobSuccess,
@@ -8,6 +8,7 @@ import {
 } from '../../../lib/dbHelpers';
 import { sendMessage, sendPhoto, editMessageText } from '../../../lib/telegram';
 import { storeResult } from '../../../lib/storeResult';
+import { safeError } from '../../../lib/logger';
 
 function verifyWebhookSignature(
   jobId: string,
@@ -64,14 +65,13 @@ export default async function handler(
     const payload = req.body;
     const chatId = job.telegram_chat_id;
 
-    // Verify webhook signature (if configured)
+    // Verify webhook signature (strict enforcement)
     const webhookSignature = req.headers['x-webhook-signature'] as string | undefined;
     if (job.webhook_secret) {
       const isValid = verifyWebhookSignature(jobId, job.webhook_secret, webhookSignature);
       if (!isValid) {
-        console.warn(`[provider/callback] Invalid webhook signature for job ${jobId}`);
-        // Still process for backward compatibility, but log warning
-        // In production, you might want to reject: return res.status(401).json({ error: 'Invalid signature' });
+        console.error(`[provider/callback] REJECTED: Invalid webhook signature for job ${jobId}`);
+        return res.status(401).json({ error: 'Invalid signature' });
       }
     }
 
@@ -126,7 +126,7 @@ export default async function handler(
         jobId,
         source: { url: outputUrl },
         variantName: 'final',
-        retentionDays: config.RETENTION_DAYS,
+        retentionDays: getConfig().RETENTION_DAYS,
         providerMeta: {
           provider: 'replicate',
           provider_job_id: payload.id,
@@ -159,10 +159,7 @@ export default async function handler(
     // Unknown status
     return res.status(200).json({ ok: true });
   } catch (error) {
-    console.error(
-      '[provider/callback] Error:',
-      error instanceof Error ? error.message : String(error),
-    );
+    safeError('[provider/callback] Error', error);
 
     // Try to notify user if we have job info
     try {
@@ -174,7 +171,7 @@ export default async function handler(
         );
       }
     } catch (notifyError) {
-      console.error('[provider/callback] Failed to notify user:', notifyError);
+      safeError('[provider/callback] Failed to notify user', notifyError);
     }
 
     // Always return 200 to provider to avoid retry storms

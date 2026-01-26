@@ -1,5 +1,5 @@
 import type { GetServerSideProps } from 'next';
-import config from '../../lib/config';
+import { getConfig } from '../../lib/config';
 
 interface Job {
   id: string;
@@ -24,7 +24,10 @@ export default function AdminPage({ authorized, jobs, error }: Props) {
     return (
       <div style={{ padding: '20px', fontFamily: 'monospace' }}>
         <h1>Unauthorized</h1>
-        <p>Missing or invalid admin token.</p>
+        <p>Please provide admin token via x-admin-token header.</p>
+        <p style={{ fontSize: '12px', color: '#666' }}>
+          Note: For security, admin tokens are no longer accepted in URL query parameters.
+        </p>
       </div>
     );
   }
@@ -128,8 +131,13 @@ export default function AdminPage({ authorized, jobs, error }: Props) {
 export const getServerSideProps: GetServerSideProps<Props> = async (
   context: any,
 ) => {
-  const token = context.query.token as string | undefined;
+  // Get token from header (preferred) or query (deprecated)
+  const headerToken = context.req.headers['x-admin-token'] as string | undefined;
+  const queryToken = context.query.token as string | undefined;
+  const token = headerToken || queryToken;
 
+  const config = getConfig();
+  
   if (!config.ADMIN_TOKEN || token !== config.ADMIN_TOKEN) {
     return {
       props: {

@@ -16,6 +16,21 @@ export function guessContentType(filename: string): string | undefined {
 }
 
 export function buildJobObjectPath(jobId: string, filename: string): string {
-  const cleanFilename = filename.replace(/^\/+/, '');
-  return `jobs/${jobId}/${cleanFilename}`;
+  // Remove leading slashes and path traversal attempts
+  let cleanFilename = filename.replace(/^\/+/, '');
+  
+  // Remove path traversal attempts (../, ..\ and encoded versions)
+  cleanFilename = cleanFilename.replace(/\.\.[\/\\]/g, '');
+  cleanFilename = cleanFilename.replace(/%2e%2e[\/\\]/gi, '');
+  cleanFilename = cleanFilename.replace(/\.\.%2f/gi, '');
+  cleanFilename = cleanFilename.replace(/\.\.%5c/gi, '');
+  
+  // Use only the basename to prevent any path manipulation
+  const parts = cleanFilename.split(/[\/\\]/);
+  const safeFilename = parts[parts.length - 1] || 'file';
+  
+  // Sanitize job ID as well
+  const safeJobId = jobId.replace(/[^a-zA-Z0-9_-]/g, '');
+  
+  return `jobs/${safeJobId}/${safeFilename}`;
 }

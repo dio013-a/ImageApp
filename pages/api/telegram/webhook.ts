@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
-import config from '../../../lib/config';
+import { getConfig } from '../../../lib/config';
 import { createJob, updateJob } from '../../../lib/dbHelpers';
 import {
   sendMessage,
@@ -14,6 +14,7 @@ import {
 import { startProviderJob } from '../../../lib/provider';
 import { checkRateLimit } from '../../../lib/rateLimit';
 import { FILE_SIZE_LIMITS } from '../../../lib/validation';
+import { safeError } from '../../../lib/logger';
 
 export default async function handler(
   req: NextApiRequest,
@@ -27,12 +28,18 @@ export default async function handler(
   let chatId: number | undefined;
 
   try {
-    // Validate Telegram signature
+    // Validate Telegram signature (required in production)
     const telegramSignature = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
     const secretToken = process.env.TG_WEBHOOK_SECRET;
+    const config = getConfig();
+    
+    if (config.NODE_ENV === 'production' && !secretToken) {
+      console.error('[webhook] FATAL: TG_WEBHOOK_SECRET not configured in production');
+      return res.status(500).json({ error: 'Server misconfigured' });
+    }
     
     if (secretToken && telegramSignature !== secretToken) {
-      console.warn('[webhook] Invalid Telegram signature');
+      console.error('[webhook] REJECTED: Invalid Telegram signature');
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
@@ -123,12 +130,13 @@ export default async function handler(
     // Build storage path
     const objectPath = buildJobObjectPath(job.id, `original${ext}`);
 
-    // Upload to Supabase Storage
+    // Upload to Supabase Storage (upsert=false to prevent accidental overwrites)
     const contentType = guessContentType(filename) || 'application/octet-stream';
     const { bucket, path } = await uploadBuffer({
       path: objectPath,
       buffer,
       contentType,
+      upsert: false,
     });
 
     // Update job with storage info
@@ -176,7 +184,7 @@ export default async function handler(
     return res.status(200).json({ ok: true });
   } catch (error) {
     // Log error without exposing secrets
-    console.error('[webhook] Error:', error instanceof Error ? error.message : String(error));
+    safeError('[webhook] Error', error);
 
     // Try to notify user if we have chatId
     if (chatId) {
@@ -186,7 +194,7 @@ export default async function handler(
           'Sorry, something went wrong. Please try again.',
         );
       } catch (notifyError) {
-        console.error('[webhook] Failed to notify user:', notifyError);
+        safeError('[webhook] Failed to notify user', notifyError);
       }
     }
 

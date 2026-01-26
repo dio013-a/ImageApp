@@ -38,6 +38,61 @@ export function validateUserId(userId: unknown): userId is number {
   return typeof userId === 'number' && !isNaN(userId);
 }
 
+/**
+ * Validate and sanitize URLs for SSRF protection
+ * Only allows HTTPS URLs from trusted domains (Replicate delivery)
+ */
+export function isValidProviderUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    
+    // Only allow HTTPS
+    if (parsed.protocol !== 'https:') {
+      return false;
+    }
+    
+    // Allowlist trusted provider domains
+    const allowedDomains = [
+      'replicate.delivery',
+      'replicate.com',
+      // Add other trusted provider domains here
+    ];
+    
+    const hostname = parsed.hostname.toLowerCase();
+    const isAllowed = allowedDomains.some(domain => 
+      hostname === domain || hostname.endsWith(`.${domain}`)
+    );
+    
+    if (!isAllowed) {
+      console.warn(`[validation] Rejected untrusted domain: ${hostname}`);
+      return false;
+    }
+    
+    // Reject localhost, private IPs, and internal domains
+    const privatePatterns = [
+      /^localhost$/i,
+      /^127\./,
+      /^10\./,
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
+      /^192\.168\./,
+      /^169\.254\./,
+      /^::1$/,
+      /^fc00:/,
+      /^fe80:/,
+    ];
+    
+    if (privatePatterns.some(pattern => pattern.test(hostname))) {
+      console.warn(`[validation] Rejected private/internal address: ${hostname}`);
+      return false;
+    }
+    
+    return true;
+  } catch (error) {
+    console.warn(`[validation] Invalid URL format: ${error instanceof Error ? error.message : 'unknown'}`);
+    return false;
+  }
+}
+
 export default {
   FILE_SIZE_LIMITS,
   ALLOWED_IMAGE_TYPES,
@@ -46,4 +101,5 @@ export default {
   sanitizePrompt,
   validateChatId,
   validateUserId,
+  isValidProviderUrl,
 };

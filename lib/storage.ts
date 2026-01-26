@@ -1,7 +1,7 @@
 // Server-only storage module using Supabase service_role key.
 
 import * as path from 'path';
-import config from './config';
+import { getConfig } from './config';
 import { supabase } from './supabase';
 import { guessContentType as utilsGuessContentType, buildJobObjectPath as utilsBuildJobObjectPath } from './utils';
 
@@ -10,7 +10,7 @@ export const guessContentType = utilsGuessContentType;
 export const buildJobObjectPath = utilsBuildJobObjectPath;
 
 export function defaultBucket(): string {
-  return config.STORAGE_BUCKET || 'uploads';
+  return getConfig().STORAGE_BUCKET || 'uploads';
 }
 
 export async function uploadBuffer(params: {

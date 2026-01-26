@@ -1,4 +1,4 @@
-import config from '../lib/config';
+import { getConfig } from '../lib/config';
 import { supabase } from '../lib/supabase';
 import { deleteObject } from '../lib/storage';
 
@@ -86,6 +86,7 @@ async function pollRunningJobsBatch(limit = 20): Promise<void> {
 }
 
 async function mainLoop() {
+  const config = getConfig();
   console.log('[worker] Started');
   console.log('[worker] Poll interval:', config.POLL_INTERVAL_MS, 'ms');
 

@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { ensureConnected } from '../../lib/supabase';
-import config from '../../lib/config';
+import { getConfig } from '../../lib/config';
 
 type HealthResponse = {
   ok: boolean;
@@ -24,7 +24,7 @@ export default async function handler(
     res.status(200).json({
       ok: true,
       ts: new Date().toISOString(),
-      env: config.NODE_ENV,
+      env: getConfig().NODE_ENV,
       uptime: process.uptime(),
     });
   } catch (error) {
