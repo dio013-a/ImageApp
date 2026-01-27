@@ -47,6 +47,29 @@ const SESSION_KEYBOARD = {
 };
 
 // ============================================================================
+// TIMING HELPERS
+// ============================================================================
+
+interface TimingLog {
+  t_received: number;
+  t_callback_acked?: number;
+  t_user_ack_sent?: number;
+  t_heavy_work_started?: number;
+  t_request_finished?: number;
+  duration_ms?: number;
+}
+
+function createTimingLog(): TimingLog {
+  return { t_received: Date.now() };
+}
+
+function logTiming(label: string, timing: TimingLog) {
+  timing.t_request_finished = Date.now();
+  timing.duration_ms = timing.t_request_finished - timing.t_received;
+  console.log(`[timing] ${label}`, JSON.stringify(timing));
+}
+
+// ============================================================================
 // IDEMPOTENCY HELPERS
 // ============================================================================
 
@@ -130,6 +153,8 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse,
 ) {
+  const timing = createTimingLog();
+  
   // Only allow POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -184,7 +209,7 @@ export default async function handler(
 
     // 1. CALLBACK QUERY (button presses)
     if (callbackQuery && callbackQuery.id) {
-      return handleCallbackQuery(res, callbackQuery);
+      return handleCallbackQuery(res, callbackQuery, timing);
     }
 
     // 2. MESSAGE HANDLING
@@ -198,6 +223,7 @@ export default async function handler(
       
       if (!rateLimit.allowed) {
         await sendMessage(chatId, 'Please slow down. Try again in a minute.');
+        logTiming('rate-limited', timing);
         return res.status(200).json({ ok: true });
       }
 
@@ -206,13 +232,13 @@ export default async function handler(
       // 2a. /start command - send welcome only
       if (messageText.startsWith('/start')) {
         console.log(`[start] chat_id=${chatId}`);
-        return handleStartCommand(res, chatId);
+        return handleStartCommand(res, chatId, timing);
       }
 
       // 2b. /cancel command
       if (messageText.startsWith('/cancel')) {
         console.log(`[cancel] chat_id=${chatId}`);
-        return handleCancelCommand(res, chatId);
+        return handleCancelCommand(res, chatId, timing);
       }
 
       // 2c. Image upload (photo or document)
@@ -221,6 +247,7 @@ export default async function handler(
         console.log(`[input] detected kind=${imageInput.kind} chat_id=${chatId} message_id=${message.message_id}`);
         return handleImageUpload(
           res,
+          timing,
           chatId,
           userId?.toString(),
           message.message_id,
@@ -254,7 +281,7 @@ export default async function handler(
 // COMMAND HANDLERS
 // ============================================================================
 
-async function handleStartCommand(res: NextApiResponse, chatId: number) {
+async function handleStartCommand(res: NextApiResponse, chatId: number, timing: TimingLog) {
   const welcomeText = `Welcome! 🎬
 
 Send me **1–14 photos** of family members.
@@ -267,23 +294,28 @@ I'll create a professional studio family portrait.`;
   await sendMessage(chatId, welcomeText, {
     reply_markup: SESSION_KEYBOARD,
   });
+  timing.t_user_ack_sent = Date.now();
 
   console.log(`[start] Sent welcome to chat_id=${chatId} (no session created yet)`);
+  logTiming('start-command', timing);
   return res.status(200).json({ ok: true });
 }
 
-async function handleCancelCommand(res: NextApiResponse, chatId: number) {
+async function handleCancelCommand(res: NextApiResponse, chatId: number, timing: TimingLog) {
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
     await sendMessage(chatId, 'No active session to cancel. Send /start to begin.');
+    timing.t_user_ack_sent = Date.now();
     console.log(`[cancel] No active session for chat_id=${chatId}`);
   } else {
     await updateSessionStatus(session.id, 'cancelled');
     await sendMessage(chatId, 'Session cancelled. Send /start to begin a new one.');
+    timing.t_user_ack_sent = Date.now();
     console.log(`[cancel] Cancelled session_id=${session.id} for chat_id=${chatId}`);
   }
   
+  logTiming('cancel-command', timing);
   return res.status(200).json({ ok: true });
 }
 
@@ -293,6 +325,7 @@ async function handleCancelCommand(res: NextApiResponse, chatId: number) {
 
 async function handleImageUpload(
   res: NextApiResponse,
+  timing: TimingLog,
   chatId: number,
   userId: string | undefined,
   messageId: number,
@@ -301,6 +334,7 @@ async function handleImageUpload(
   // Get active session (or create one if none exists)
   let session = await getActiveSession(chatId.toString());
   
+  let isNewSession = false;
   if (!session) {
     // Create new session on first image
     console.log(`[session] No active session, creating new for chat_id=${chatId}`);
@@ -309,12 +343,7 @@ async function handleImageUpload(
       userId,
     });
     console.log(`[session] Created session_id=${session.id} for chat_id=${chatId}`);
-    
-    await sendMessage(
-      chatId,
-      'Starting a new session. Send more photos or press ✅ Done when ready.',
-      { reply_markup: SESSION_KEYBOARD },
-    );
+    isNewSession = true;
   } else {
     console.log(`[session] Active session found session_id=${session.id} status=${session.status}`);
   }
@@ -325,9 +354,45 @@ async function handleImageUpload(
       chatId,
       'Current session is already processing. Please wait or send /start for a new session.',
     );
+    timing.t_user_ack_sent = Date.now();
     console.log(`[input] Session ${session.id} not in collecting state, ignoring image`);
+    logTiming('image-upload-rejected', timing);
     return res.status(200).json({ ok: true });
   }
+
+  // ============================================================================
+  // CRITICAL: ACK USER IMMEDIATELY BEFORE HEAVY WORK
+  // ============================================================================
+  
+  const currentCount = session.image_input.length;
+  const isDocument = imageInput.kind === 'document';
+  
+  // Send immediate confirmation BEFORE downloading/storing
+  if (isNewSession) {
+    await sendMessage(
+      chatId,
+      'Starting a new session. Send more photos or press ✅ Done when ready.',
+      { reply_markup: SESSION_KEYBOARD },
+    );
+  } else {
+    // Send optimistic confirmation (assume download will succeed)
+    const confirmText = isDocument
+      ? `✅ Got it (${currentCount + 1} image${currentCount + 1 > 1 ? 's' : ''}). Send more photos or press ✅ Done.`
+      : `✅ Added (${currentCount + 1}). For best quality, send as File/Document. Press ✅ Done when ready.`;
+
+    await sendMessage(chatId, confirmText, {
+      reply_markup: SESSION_KEYBOARD,
+    });
+  }
+  
+  timing.t_user_ack_sent = Date.now();
+  console.log(`[input] Sent immediate ACK to user (before download)`);
+
+  // ============================================================================
+  // HEAVY WORK: Download and store (happens AFTER user sees confirmation)
+  // ============================================================================
+  
+  timing.t_heavy_work_started = Date.now();
 
   try {
     // Download file from Telegram with timeout (45s max)
@@ -348,8 +413,9 @@ async function handleImageUpload(
     if (buffer.length > FILE_SIZE_LIMITS.MAX_IMAGE_SIZE) {
       await sendMessage(
         chatId,
-        '❌ Image too large. Please send an image smaller than 20MB.',
+        '❌ Image too large (>20MB). That one was skipped. Please send smaller images.',
       );
+      logTiming('image-upload-too-large', timing);
       return res.status(200).json({ ok: true });
     }
 
@@ -395,24 +461,16 @@ async function handleImageUpload(
     const imageCount = session.image_input.length;
 
     console.log(`[input] Added message_id=${messageId} to session_id=${session.id} (${imageCount} total)`);
-
-    // Send confirmation
-    const isDocument = imageInput.kind === 'document';
-    const confirmText = isDocument
-      ? `✅ Got it (${imageCount} image${imageCount > 1 ? 's' : ''}). Send more photos or press ✅ Done.`
-      : `✅ Added (${imageCount}). For best quality, send as File/Document. Press ✅ Done when ready.`;
-
-    await sendMessage(chatId, confirmText, {
-      reply_markup: SESSION_KEYBOARD,
-    });
+    logTiming('image-upload-success', timing);
 
   } catch (error: any) {
     safeError('[input] Image upload failed', error);
     
+    // Send error message to user (they already saw optimistic confirmation)
     if (error.message === 'Download timeout') {
       await sendMessage(
         chatId,
-        '❌ Download took too long. Please try a smaller file or better connection.',
+        '❌ Download took too long. Please resend that image as File/Document.',
       );
     } else if (error.message?.includes('Maximum 14 images')) {
       await sendMessage(
@@ -422,9 +480,10 @@ async function handleImageUpload(
     } else {
       await sendMessage(
         chatId,
-        '❌ I could not process that file. Please send a JPG or PNG photo.',
+        '❌ Could not save that image. Please resend as File/Document.',
       );
     }
+    logTiming('image-upload-failed', timing);
   }
 
   return res.status(200).json({ ok: true });
@@ -437,6 +496,7 @@ async function handleImageUpload(
 async function handleCallbackQuery(
   res: NextApiResponse,
   callbackQuery: any,
+  timing: TimingLog,
 ) {
   const chatId = callbackQuery.message?.chat?.id;
   const userId = callbackQuery.from?.id;
@@ -451,29 +511,41 @@ async function handleCallbackQuery(
 
   console.log(`[callback] data=${data} chat_id=${chatId} callback_id=${callbackId}`);
 
+  // ============================================================================
+  // CRITICAL: ACK CALLBACK QUERY IMMEDIATELY (stop loading spinner in Telegram)
+  // ============================================================================
+  try {
+    await answerCallbackQuery(callbackId);
+    timing.t_callback_acked = Date.now();
+    console.log(`[callback] ACKed callback_id=${callbackId} immediately`);
+  } catch (ackError) {
+    // Log but continue - don't let ACK failure crash the webhook
+    safeError('[callback] Failed to ACK callback query', ackError);
+  }
+
+  // ============================================================================
+  // HANDLE BUTTON ACTIONS (after ACK, so user sees instant response)
+  // ============================================================================
   try {
     if (data === 'session:done') {
-      await handleSessionDone(chatId, userId, messageId, callbackId);
+      await handleSessionDone(chatId, userId, messageId, callbackId, timing);
     } else if (data === 'session:cancel') {
-      await handleSessionCancel(chatId, messageId, callbackId);
+      await handleSessionCancel(chatId, messageId, callbackId, timing);
     } else if (data === 'session:tips') {
-      await handleSessionTips(chatId, callbackId);
+      await handleSessionTips(chatId, callbackId, timing);
     } else {
       console.log(`[callback] Unknown data=${data}`);
     }
   } catch (error) {
     safeError('[callback] Error handling callback query', error);
     try {
-      await answerCallbackQuery(callbackId, {
-        text: 'Something went wrong. Please try again.',
-        show_alert: true,
-      });
-    } catch (answerError) {
-      // Ignore if answerCallbackQuery fails (e.g., already answered or expired)
-      safeError('[callback] Failed to answer callback query', answerError);
+      await sendMessage(chatId, '❌ Something went wrong. Please try again.');
+    } catch (msgError) {
+      safeError('[callback] Failed to send error message', msgError);
     }
   }
 
+  logTiming(`callback-${data}`, timing);
   return res.status(200).json({ ok: true });
 }
 
@@ -486,19 +558,14 @@ async function handleSessionDone(
   userId: number | undefined,
   messageId: number | undefined,
   callbackId: string,
+  timing: TimingLog,
 ) {
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
     console.log(`[done] No active session for chat_id=${chatId}`);
-    try {
-      await answerCallbackQuery(callbackId, {
-        text: 'No active session. Send /start to begin.',
-        show_alert: true,
-      });
-    } catch (err) {
-      safeError('[done] Failed to answer callback query', err);
-    }
+    await sendMessage(chatId, 'No active session. Send /start to begin.');
+    timing.t_user_ack_sent = Date.now();
     return;
   }
 
@@ -509,33 +576,28 @@ async function handleSessionDone(
   // Validate image count
   if (imageCount === 0) {
     console.log(`[done] Session ${session.id} has no images, asking user to upload`);
-    try {
-      await answerCallbackQuery(callbackId, {
-        text: 'Please send at least one photo first.',
-        show_alert: true,
-      });
-    } catch (err) {
-      safeError('[done] Failed to answer callback query', err);
-    }
+    await sendMessage(chatId, 'Please send at least one photo first.');
+    timing.t_user_ack_sent = Date.now();
     return;
   }
 
   // Idempotency: check if already processing
   if (session.status === 'processing') {
     console.log(`[done] Session ${session.id} already processing, skipping duplicate`);
-    try {
-      await answerCallbackQuery(callbackId, {
-        text: 'Already processing your images...',
-      });
-    } catch (err) {
-      safeError('[done] Failed to answer callback query', err);
-    }
+    await sendMessage(chatId, 'Already processing your images. Please wait...');
+    timing.t_user_ack_sent = Date.now();
     return;
   }
 
-  // Update session status to processing
-  await updateSessionStatus(session.id, 'processing');
-  console.log(`[done] Updated session ${session.id} to processing`);
+  // ============================================================================
+  // CRITICAL: Send "Processing..." message IMMEDIATELY before starting job
+  // ============================================================================
+  
+  await sendMessage(
+    chatId,
+    `🎬 Creating your professional studio family portrait from ${imageCount} photo${imageCount > 1 ? 's' : ''}…\n\nThis may take a few minutes. I'll send the result here when ready.`,
+  );
+  timing.t_user_ack_sent = Date.now();
 
   // Remove keyboard from previous message
   if (messageId) {
@@ -546,18 +608,15 @@ async function handleSessionDone(
     }
   }
 
-  try {
-    await answerCallbackQuery(callbackId, {
-      text: `Processing ${imageCount} image${imageCount > 1 ? 's' : ''}...`,
-    });
-  } catch (err) {
-    safeError('[done] Failed to answer callback query', err);
-  }
+  // Update session status to processing
+  await updateSessionStatus(session.id, 'processing');
+  console.log(`[done] Updated session ${session.id} to processing`);
 
-  await sendMessage(
-    chatId,
-    `🎬 Creating your professional studio family portrait from ${imageCount} photo${imageCount > 1 ? 's' : ''}…\n\nThis may take a few minutes. I'll send the result here when ready.`,
-  );
+  // ============================================================================
+  // HEAVY WORK: Start generation (happens AFTER user sees "Processing..." message)
+  // ============================================================================
+  
+  timing.t_heavy_work_started = Date.now();
 
   // Start the generation job
   try {
@@ -582,18 +641,14 @@ async function handleSessionCancel(
   chatId: number,
   messageId: number | undefined,
   callbackId: string,
+  timing: TimingLog,
 ) {
   const session = await getActiveSession(chatId.toString());
   
   if (!session) {
     console.log(`[cancel] No active session for chat_id=${chatId}`);
-    try {
-      await answerCallbackQuery(callbackId, {
-        text: 'No active session to cancel.',
-      });
-    } catch (err) {
-      safeError('[cancel] Failed to answer callback query', err);
-    }
+    await sendMessage(chatId, 'No active session to cancel.');
+    timing.t_user_ack_sent = Date.now();
     return;
   }
 
@@ -609,18 +664,11 @@ async function handleSessionCancel(
     }
   }
 
-  try {
-    await answerCallbackQuery(callbackId, {
-      text: 'Session cancelled.',
-    });
-  } catch (err) {
-    safeError('[cancel] Failed to answer callback query', err);
-  }
-
   await sendMessage(chatId, 'Session cancelled. Send /start to begin a new one.');
+  timing.t_user_ack_sent = Date.now();
 }
 
-async function handleSessionTips(chatId: number, callbackId: string) {
+async function handleSessionTips(chatId: number, callbackId: string, timing: TimingLog) {
   const tipsText = `📸 **Tips for best results:**
 
 • Send clear, well-lit photos
@@ -631,13 +679,8 @@ async function handleSessionTips(chatId: number, callbackId: string) {
 
 Press ✅ Done when ready!`;
 
-  try {
-    await answerCallbackQuery(callbackId);
-  } catch (err) {
-    safeError('[tips] Failed to answer callback query', err);
-  }
-  
   await sendMessage(chatId, tipsText, { parse_mode: 'Markdown' });
+  timing.t_user_ack_sent = Date.now();
   console.log(`[tips] Sent tips to chat_id=${chatId}`);
 }
 
