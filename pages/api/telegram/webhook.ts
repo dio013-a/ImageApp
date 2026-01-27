@@ -164,19 +164,38 @@ export default async function handler(
   const updateId = update.update_id;
 
   try {
-    // Validate Telegram signature (required in production)
-    const telegramSignature = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
+    // ========================================================================
+    // TELEGRAM WEBHOOK SECRET VALIDATION
+    // ========================================================================
+    // Telegram sends X-Telegram-Bot-Api-Secret-Token header when secret_token
+    // is configured in setWebhook. This is the recommended security mechanism.
+    
     const secretToken = process.env.TG_WEBHOOK_SECRET;
     const config = getConfig();
 
-    if (config.NODE_ENV === 'production' && !secretToken) {
-      console.error('[webhook] FATAL: TG_WEBHOOK_SECRET not configured in production');
-      return res.status(500).json({ error: 'Server misconfigured' });
-    }
-    
-    if (secretToken && telegramSignature !== secretToken) {
-      console.error('[webhook] REJECTED: Invalid Telegram signature');
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (secretToken) {
+      // Secret token is configured - validate the header
+      const telegramSecretHeader = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
+      
+      if (!telegramSecretHeader) {
+        console.warn('[webhook] REJECTED: Missing X-Telegram-Bot-Api-Secret-Token header');
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      
+      if (telegramSecretHeader !== secretToken) {
+        console.warn('[webhook] REJECTED: Invalid secret token in header');
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      
+      // Valid secret token - proceed
+      console.log('[webhook] Secret token validated successfully');
+    } else {
+      // No secret token configured - validation disabled (debug mode)
+      if (config.NODE_ENV === 'production') {
+        console.warn('[webhook] WARNING: TG_WEBHOOK_SECRET not set in production - webhook is unprotected!');
+      } else {
+        console.log('[webhook] Secret token validation disabled (TG_WEBHOOK_SECRET not set)');
+      }
     }
 
     // Idempotency check: skip if already processed
