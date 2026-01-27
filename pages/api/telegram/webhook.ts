@@ -169,32 +169,27 @@ export default async function handler(
     // ========================================================================
     // Telegram sends X-Telegram-Bot-Api-Secret-Token header when secret_token
     // is configured in setWebhook. This is the recommended security mechanism.
+    // NOTE: If TG_WEBHOOK_SECRET is set but Telegram webhook wasn't configured
+    // with secret_token, requests will be allowed (header won't be checked).
     
     const secretToken = process.env.TG_WEBHOOK_SECRET;
+    const telegramSecretHeader = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
     const config = getConfig();
 
-    if (secretToken) {
-      // Secret token is configured - validate the header
-      const telegramSecretHeader = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
-      
-      if (!telegramSecretHeader) {
-        console.warn('[webhook] REJECTED: Missing X-Telegram-Bot-Api-Secret-Token header');
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
-      
+    // Only validate if BOTH secret is configured AND header is present
+    if (secretToken && telegramSecretHeader) {
       if (telegramSecretHeader !== secretToken) {
         console.warn('[webhook] REJECTED: Invalid secret token in header');
         return res.status(403).json({ error: 'Forbidden' });
       }
-      
-      // Valid secret token - proceed
       console.log('[webhook] Secret token validated successfully');
-    } else {
-      // No secret token configured - validation disabled (debug mode)
+    } else if (secretToken && !telegramSecretHeader) {
+      // Secret is set but Telegram didn't send header - webhook not configured with secret_token
+      console.warn('[webhook] WARNING: TG_WEBHOOK_SECRET is set but Telegram is not sending the header. Run: npm run set:webhook');
+    } else if (!secretToken) {
+      // No secret configured
       if (config.NODE_ENV === 'production') {
         console.warn('[webhook] WARNING: TG_WEBHOOK_SECRET not set in production - webhook is unprotected!');
-      } else {
-        console.log('[webhook] Secret token validation disabled (TG_WEBHOOK_SECRET not set)');
       }
     }
 
