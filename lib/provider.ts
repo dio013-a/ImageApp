@@ -86,7 +86,7 @@ async function startReplicateJob(params: StartJobParams): Promise<StartJobResult
       version: modelVersion,
       input,
       webhook: callbackUrl,
-      webhook_events_filter: ['completed', 'failed'],
+      webhook_events_filter: ['completed'],
     };
     console.log(`[replicate:start] mode=version version=${modelVersion.substring(0, 12)}...`);
   } else {
@@ -96,7 +96,7 @@ async function startReplicateJob(params: StartJobParams): Promise<StartJobResult
     payload = {
       input,
       webhook: callbackUrl,
-      webhook_events_filter: ['completed', 'failed'],
+      webhook_events_filter: ['completed'],
     };
     console.log(`[replicate:start] mode=slug model=${model}`);
   }

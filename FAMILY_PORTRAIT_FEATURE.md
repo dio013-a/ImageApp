@@ -146,7 +146,7 @@ await startProviderJob({
     "safety_filter_level": "block_only_high"
   },
   "webhook": "https://yourapp.vercel.app/api/provider/callback?job_id=xxx",
-  "webhook_events_filter": ["completed", "failed"]
+  "webhook_events_filter": ["completed"]
 }
 ```
 
