@@ -19,14 +19,24 @@ export const config = {
 };
 
 /**
- * Read raw request body as string
+ * Read raw request body as string using Node stream events
  */
 async function getRawBody(req: NextApiRequest): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
-  }
-  return Buffer.concat(chunks).toString('utf-8');
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    
+    req.on('data', (chunk: Buffer | string) => {
+      chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+    });
+    
+    req.on('end', () => {
+      resolve(Buffer.concat(chunks).toString('utf-8'));
+    });
+    
+    req.on('error', (err) => {
+      reject(err);
+    });
+  });
 }
 
 function verifyWebhookSignature(
