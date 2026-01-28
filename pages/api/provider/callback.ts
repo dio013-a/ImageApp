@@ -11,6 +11,24 @@ import { storeResult } from '../../../lib/storeResult';
 import { safeError } from '../../../lib/logger';
 import { getSessionByJobId, updateSessionStatus } from '../../../lib/sessionHelpers';
 
+// Disable Next's automatic body parsing - we'll handle raw body manually
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+/**
+ * Read raw request body as string
+ */
+async function getRawBody(req: NextApiRequest): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString('utf-8');
+}
+
 function verifyWebhookSignature(
   jobId: string,
   webhookSecret: string | null,
@@ -49,6 +67,22 @@ export default async function handler(
     return res.status(200).json({ ok: true });
   }
 
+  // Parse raw body as JSON
+  let payload: any;
+  try {
+    const rawBody = await getRawBody(req);
+    
+    // Debug logging (first request only - avoid spam)
+    const contentType = req.headers['content-type'] || 'unknown';
+    console.log(`[provider/callback] job_id=${jobId} content-type=${contentType} body_length=${rawBody.length}`);
+    
+    payload = JSON.parse(rawBody);
+  } catch (parseError) {
+    const contentType = req.headers['content-type'] || 'unknown';
+    console.error(`[provider/callback] JSON parse failed: content-type=${contentType}`);
+    return res.status(400).json({ error: 'Invalid JSON' });
+  }
+
   try {
     // Fetch job
     const job = await getJobById(jobId);
@@ -63,7 +97,6 @@ export default async function handler(
       return res.status(200).json({ ok: true });
     }
 
-    const payload = req.body;
     const chatId = job.telegram_chat_id;
 
     // Verify webhook signature (strict enforcement)
