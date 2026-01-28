@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+import type { IncomingMessage } from 'http';
 import crypto from 'crypto';
 import { getConfig } from '../../../lib/config';
 import {
@@ -24,16 +25,17 @@ export const config = {
 async function getRawBody(req: NextApiRequest): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    const stream = req as unknown as IncomingMessage;
     
-    req.on('data', (chunk: Buffer | string) => {
+    stream.on('data', (chunk: Buffer | string) => {
       chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
     });
     
-    req.on('end', () => {
+    stream.on('end', () => {
       resolve(Buffer.concat(chunks).toString('utf-8'));
     });
     
-    req.on('error', (err) => {
+    stream.on('error', (err) => {
       reject(err);
     });
   });
