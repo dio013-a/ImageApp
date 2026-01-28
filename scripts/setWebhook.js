@@ -1,5 +1,3 @@
-const fetch = require('undici').fetch;
-
 async function setWebhook() {
   // Load config - this will throw if required env vars are missing
   const { getConfig } = require('../lib/config');

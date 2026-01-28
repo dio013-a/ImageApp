@@ -768,14 +768,15 @@ async function startSessionGeneration(
   console.log(`[generation] Starting provider job with ${inputImages.length} images`);
 
   // Start provider job with multiple images
+  // Note: prompt, aspect_ratio, resolution, output_format are handled by provider defaults
   await startProviderJob({
     jobId: job.id,
     inputImages,
-    prompt,
-    modelVersion: process.env.REPLICATE_MODEL_VERSION,
+    model: process.env.REPLICATE_MODEL, // Uses google/nano-banana-pro by default
+    modelVersion: process.env.REPLICATE_MODEL_VERSION, // Optional pinned version
     settings: {
       aspect_ratio: session.aspect_ratio || '4:3',
-      resolution: session.resolution || '2K',
+      resolution: session.resolution || '1K', // Changed from 2K to 1K for Nano Banana Pro
       output_format: session.output_format || 'png',
       safety_filter_level: 'block_only_high',
     },

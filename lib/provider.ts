@@ -11,7 +11,8 @@ export interface StartJobParams {
   inputImages?: Array<{ bucket?: string; path: string }>; // Multi-image support
   prompt?: string;
   settings?: Record<string, any>;
-  modelVersion?: string;
+  model?: string; // Model slug (e.g. "google/nano-banana-pro")
+  modelVersion?: string; // Optional pinned version
 }
 
 export interface StartJobResult {
@@ -31,7 +32,7 @@ async function startReplicateJob(params: StartJobParams): Promise<StartJobResult
   const callbackUrl = `${config.BASE_URL}/api/provider/callback?job_id=${params.jobId}`;
 
   // Handle multiple images or single image
-  let imageInputData: string | string[];
+  let imageInputData: string | string[] = [];
   
   if (params.inputImages && params.inputImages.length > 0) {
     // Multi-image: create signed URLs for all images
@@ -52,38 +53,65 @@ async function startReplicateJob(params: StartJobParams): Promise<StartJobResult
       path: params.inputImage.path,
       expiresIn: 900,
     });
-  } else {
-    throw new Error('[replicate:start] No input image(s) provided');
   }
+  // Note: imageInputData can be empty array for text-only generation
 
-  // Determine model version
+  // Determine model identifier (slug or version)
+  const model = params.model || process.env.REPLICATE_MODEL || 'google/nano-banana-pro';
   const modelVersion = params.modelVersion || process.env.REPLICATE_MODEL_VERSION;
-  if (!modelVersion) {
-    throw new Error('[replicate:start] modelVersion required but not provided');
+
+  // Studio portrait prompt (fixed for professional results)
+  const studioPrompt = params.prompt || 
+    "a professional studio-style portrait with soft, even lighting and a neutral background. The people are sharply focused, well-groomed, and confidently posed, with natural skin tones and subtle contrast. High-resolution, polished, and suitable for corporate or personal branding use.";
+
+  // Build input object for Nano Banana Pro
+  const input: Record<string, any> = {
+    prompt: studioPrompt,
+    image_input: imageInputData,
+    aspect_ratio: params.settings?.aspect_ratio || '4:3',
+    resolution: params.settings?.resolution || '1K',
+    output_format: params.settings?.output_format || 'png',
+    safety_filter_level: params.settings?.safety_filter_level || 'block_only_high',
+  };
+
+  let endpoint: string;
+  let payload: any;
+  let mode: string;
+
+  if (modelVersion) {
+    // Version mode: use /v1/predictions with version
+    mode = 'version';
+    endpoint = 'https://api.replicate.com/v1/predictions';
+    payload = {
+      version: modelVersion,
+      input,
+      webhook: callbackUrl,
+      webhook_events_filter: ['completed', 'failed'],
+    };
+    console.log(`[replicate:start] mode=version version=${modelVersion.substring(0, 12)}...`);
+  } else {
+    // Slug mode: use /v1/models/{owner}/{name}/predictions
+    mode = 'slug';
+    endpoint = `https://api.replicate.com/v1/models/${model}/predictions`;
+    payload = {
+      input,
+      webhook: callbackUrl,
+      webhook_events_filter: ['completed', 'failed'],
+    };
+    console.log(`[replicate:start] mode=slug model=${model}`);
   }
 
-  // Build input object
-  const input: Record<string, any> = {
-    image_input: imageInputData, // Use image_input for multi-image models
-    ...(params.settings || {}),
-  };
-  if (params.prompt) {
-    input.prompt = params.prompt;
-  }
+  // Log input details
+  console.log(`[replicate:start] input keys: prompt, image_input[${Array.isArray(imageInputData) ? imageInputData.length : 1}], aspect_ratio=${input.aspect_ratio}, resolution=${input.resolution}, output_format=${input.output_format}, safety_filter_level=${input.safety_filter_level}`);
 
   // Start Replicate prediction
-  const res = await fetch('https://api.replicate.com/v1/predictions', {
+  const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       Authorization: `Token ${config.REPLICATE_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      version: modelVersion,
-      input,
-      webhook: callbackUrl,
-      webhook_events_filter: ['completed', 'failed'],
-    }),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
@@ -101,6 +129,8 @@ async function startReplicateJob(params: StartJobParams): Promise<StartJobResult
   if (!data.id) {
     throw new Error('[replicate:start] No prediction ID returned');
   }
+
+  console.log(`[replicate:start] prediction created id=${data.id}`);
 
   return {
     provider: 'replicate',

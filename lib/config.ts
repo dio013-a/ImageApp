@@ -9,6 +9,7 @@ export type AppConfig = {
   TG_TOKEN: string;
   BASE_URL: string;
   REPLICATE_KEY?: string;
+  REPLICATE_MODEL?: string;
   STORAGE_BUCKET: string;
   ADMIN_TOKEN?: string;
   RETENTION_DAYS: number;
@@ -33,6 +34,7 @@ export function getConfig(): AppConfig {
     TG_TOKEN: assertEnv('TG_TOKEN', process.env.TG_TOKEN),
     BASE_URL: assertEnv('BASE_URL', process.env.BASE_URL),
     REPLICATE_KEY: process.env.REPLICATE_KEY?.trim(),
+    REPLICATE_MODEL: process.env.REPLICATE_MODEL?.trim() || 'google/nano-banana-pro',
     STORAGE_BUCKET,
     ADMIN_TOKEN: process.env.ADMIN_TOKEN?.trim(),
     RETENTION_DAYS: Number.isFinite(RETENTION_DAYS) && RETENTION_DAYS > 0 ? RETENTION_DAYS : 30,
